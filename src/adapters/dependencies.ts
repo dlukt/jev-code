@@ -9,9 +9,9 @@ import type {
   WorkspaceSource,
 } from "../workflows/ports.ts";
 import { parseComments } from "./comments.ts";
+import { classifierFor, DEFAULT_PROVIDER, type ProviderName } from "./config.ts";
 import { parseUnifiedDiff } from "./diff.ts";
 import { collectDiff, trackedFiles } from "./git.ts";
-import { classifyError } from "./jev.ts";
 import { parseFailureLog } from "./logs.ts";
 import { readLines, resolveWorkspacePath } from "./paths.ts";
 import { Recorder } from "./recorder.ts";
@@ -66,7 +66,7 @@ export function createRunId(workflow: string): string {
 export function createWorkflowDependencies(
   root: string,
   jev: JevPort,
-  classify: (error: unknown) => TransportFailure = classifyError,
+  classify: ProviderName | ((error: unknown) => TransportFailure) = DEFAULT_PROVIDER,
 ): WorkflowDependencies {
   return {
     jev,
@@ -74,7 +74,7 @@ export function createWorkflowDependencies(
     evidence: createEvidenceParser(),
     redaction: createRedaction(),
     artifacts: createArtifactStore(root),
-    classifyError: classify,
+    classifyError: typeof classify === "string" ? classifierFor(classify) : classify,
     createRunId,
   };
 }

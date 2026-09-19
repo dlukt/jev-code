@@ -1,7 +1,9 @@
 import type { Experimental_EvaluationModel } from "ai";
 import { experimental_evaluate as aiEvaluate, createGateway } from "ai";
+import { estimateTokens } from "../core/budget.ts";
 import type { Entry, Question, Questions } from "../core/questions.ts";
 import type { JevCallOptions, JevPort, JevRequest, TransportFailure } from "../core/types.ts";
+import { ValidationError } from "../core/validation.ts";
 import { MissingCredentialError } from "./jev.ts";
 
 export { MissingCredentialError };
@@ -109,15 +111,28 @@ export class VercelJevProvider implements JevPort {
       clearTimeout(timer);
       external?.removeEventListener("abort", forward);
     }
-    return {
-      model: result.response?.modelId ?? gatewayModel,
-      answers: translateAnswers(
+    let answers: Record<string, unknown>;
+    try {
+      answers = translateAnswers(
         request.questions,
         result.answers,
         typesafeConfidence(result.providerMetadata),
-      ),
+      );
+    } catch (error) {
+      // Malformed gateway answers are invalid model responses, not transport
+      // failures: surface them as validation errors so the executor's
+      // invalid-response retry path handles them instead of failing the frame.
+      throw new ValidationError(error instanceof Error ? error.message : String(error));
+    }
+    return {
+      model: result.response?.modelId ?? gatewayModel,
+      answers,
       usage: {
-        input_tokens: result.usage?.inputTokens ?? 0,
+        // A missing usage report must not zero out the budgeted input estimate
+        // (Budget.settle would subtract it), or --max-input-tokens stops
+        // guarding anything. Report the same deterministic estimate the
+        // executor reserved so the counter keeps advancing conservatively.
+        input_tokens: result.usage?.inputTokens ?? estimateTokens(request),
         output_tokens: result.usage?.outputTokens ?? 0,
       },
     };

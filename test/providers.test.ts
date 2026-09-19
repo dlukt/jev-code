@@ -22,7 +22,9 @@ import {
   GATEWAY_MODEL,
   VercelJevProvider,
 } from "../src/adapters/vercel-jev.ts";
+import { estimateTokens } from "../src/core/budget.ts";
 import type { JevRequest, TransportFailure } from "../src/core/types.ts";
+import { ValidationError } from "../src/core/validation.ts";
 import { check } from "../src/workflows/check.ts";
 import { fake, options, tempRepo } from "./helpers.ts";
 
@@ -227,7 +229,7 @@ describe("Vercel provider request translation", () => {
     assert.equal(response.model, "jev-1.13.0");
   });
 
-  test("missing per-question answers and type mismatches are rejected", async () => {
+  test("missing per-question answers and type mismatches are rejected as validation errors", async () => {
     const provider = new VercelJevProvider({
       evaluate: async () => ({ answers: {} }),
     });
@@ -236,7 +238,11 @@ describe("Vercel provider request translation", () => {
         { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
         CALL_OPTIONS,
       ),
-      /no answer for question "n"/,
+      (error: unknown) => {
+        assert.ok(error instanceof ValidationError, "expected a ValidationError");
+        assert.match(error.message, /no answer for question "n"/);
+        return true;
+      },
     );
     const mismatch = new VercelJevProvider({
       evaluate: async () => ({ answers: { n: { type: "choice", choice: "x" } } }),
@@ -246,7 +252,11 @@ describe("Vercel provider request translation", () => {
         { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
         CALL_OPTIONS,
       ),
-      /not a boolean answer/,
+      (error: unknown) => {
+        assert.ok(error instanceof ValidationError, "expected a ValidationError");
+        assert.match(error.message, /not a boolean answer/);
+        return true;
+      },
     );
   });
 
@@ -286,15 +296,21 @@ describe("Vercel provider request translation", () => {
     assert.equal(response.answers.s.confidence, 1);
   });
 
-  test("default usage is zero when the gateway omits it", async () => {
+  test("missing gateway usage falls back to the deterministic input estimate", async () => {
     const provider = new VercelJevProvider({
       evaluate: async () => ({ answers: { n: { type: "boolean", probability: 0.5 } } }),
     });
-    const response = (await provider.ask(
-      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
-      CALL_OPTIONS,
-    )) as { usage: Record<string, number> };
-    assert.deepEqual(response.usage, { input_tokens: 0, output_tokens: 0 });
+    const request = {
+      state: { diff: "x".repeat(300) },
+      questions: { n: { type: "noul", instructions: "?" } as const },
+      model: "m",
+    };
+    const response = (await provider.ask(request, CALL_OPTIONS)) as { usage: Record<string, number> };
+    // The same estimate the executor reserved: the input-token budget keeps
+    // advancing and --max-input-tokens still guards the run.
+    assert.equal(response.usage.input_tokens, estimateTokens(request));
+    assert.ok(response.usage.input_tokens > 0);
+    assert.equal(response.usage.output_tokens, 0);
   });
 
   test("noul criteria may be absent; null criteria are dropped", async () => {
@@ -379,7 +395,7 @@ describe("provider-independent review behavior", () => {
         { task: "change x", scope: "worktree" },
         {
           ...options(r.root, adapter),
-          dependencies: createWorkflowDependencies(r.root, adapter, classifyVercelError),
+          dependencies: createWorkflowDependencies(r.root, adapter, "vercel"),
         },
       );
       assert.equal(packet.schema, "jev-code.packet/v1");
@@ -498,8 +514,9 @@ describe("Vercel provider: credentials, model semantics, confidence, ZDR", () =>
     // so the Authorization header observed on the wire is the one from customEnv.
     const key = "vck_test_wiring_proof_1234";
     const customEnv = { AI_GATEWAY_API_KEY: key };
-    // The provider must not mutate process.env while constructing.
-    assert.equal(process.env.AI_GATEWAY_API_KEY, undefined);
+    // The provider must not mutate process.env while constructing: the value
+    // observed afterwards is exactly the one observed before.
+    const before = process.env.AI_GATEWAY_API_KEY;
     const { createServer } = await import("node:http");
     const received: Array<{ auth: string | undefined; body: unknown; modelHeader: string | undefined }> = [];
     const server = createServer((req, res) => {
@@ -529,6 +546,7 @@ describe("Vercel provider: credentials, model semantics, confidence, ZDR", () =>
     const adapter = createVercelAdapter(customEnv, {
       baseURL: `http://127.0.0.1:${port}/v4/ai`,
     });
+    assert.equal(process.env.AI_GATEWAY_API_KEY, before);
     const response = (await adapter.ask(
       {
         state: { text: "s" },

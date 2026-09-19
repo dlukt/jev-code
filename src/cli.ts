@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
   configuredModel,
+  configuredProvider,
   InvalidProviderError,
   jevFromEnvironment,
   MODEL_ENV,
@@ -289,12 +290,7 @@ export async function runCli(
 
     const jev = injected.adapter ?? jevFromEnvironment(io.env);
     const root = typeof v.repo === "string" ? await repoRoot(v.repo) : await repoRoot(io.cwd);
-    const provider = io.env[PROVIDER_ENV]?.trim() || "typesafe";
-    const dependencies = createWorkflowDependencies(
-      root,
-      jev,
-      provider === "vercel" ? classifyVercelError : classifyError,
-    );
+    const dependencies = createWorkflowDependencies(root, jev, configuredProvider(io.env));
     const model = configuredModel(v.model as string | undefined, io.env);
     const options: RunOptions = {
       root,
