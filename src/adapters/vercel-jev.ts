@@ -94,10 +94,11 @@ export class VercelJevProvider implements JevPort {
     const external = options.signal;
     const forward = () => controller.abort(external?.reason);
     external?.addEventListener("abort", forward, { once: true });
+    const gatewayModel = gatewayModelFor(request.model, this.model);
     let result: Awaited<ReturnType<EvaluateFn>>;
     try {
       result = await this.evaluate({
-        model: this.modelFactory(gatewayModelFor(request.model, this.model)),
+        model: this.modelFactory(gatewayModel),
         state: request.state as Entry,
         questions: translateQuestions(request.questions),
         maxRetries: 0,
@@ -109,7 +110,7 @@ export class VercelJevProvider implements JevPort {
       external?.removeEventListener("abort", forward);
     }
     return {
-      model: result.response?.modelId ?? this.model,
+      model: result.response?.modelId ?? gatewayModel,
       answers: translateAnswers(
         request.questions,
         result.answers,
@@ -123,8 +124,19 @@ export class VercelJevProvider implements JevPort {
   }
 }
 
+/** Options for test injection; production code uses the defaults. */
+export interface VercelAdapterOptions {
+  /** Gateway base URL override, forwarded to createGateway. */
+  baseURL?: string;
+  /** Evaluation function override. */
+  evaluate?: EvaluateFn;
+}
+
 /** Build the gateway-backed Jev port. The API key is read only from the given environment. */
-export function createVercelAdapter(env: NodeJS.ProcessEnv = process.env): JevPort {
+export function createVercelAdapter(
+  env: NodeJS.ProcessEnv = process.env,
+  options: VercelAdapterOptions = {},
+): JevPort {
   const apiKey = env.AI_GATEWAY_API_KEY?.trim();
   if (!apiKey)
     throw new MissingCredentialError(
@@ -132,12 +144,13 @@ export function createVercelAdapter(env: NodeJS.ProcessEnv = process.env): JevPo
     );
   // Bind the key to an explicit gateway instance instead of relying on the
   // process-global default provider; process.env is never mutated.
-  const gateway = createGateway({ apiKey });
+  const gateway = createGateway({ apiKey, ...(options.baseURL ? { baseURL: options.baseURL } : {}) });
   const model = env[GATEWAY_MODEL_ENV]?.trim() || GATEWAY_MODEL;
   const zeroDataRetention = !/^(?:0|false|no|off)$/i.test(env[ZERO_DATA_RETENTION_ENV]?.trim() ?? "");
   return new VercelJevProvider({
     model,
     zeroDataRetention,
+    ...(options.evaluate ? { evaluate: options.evaluate } : {}),
     modelFactory: (id) => gateway.evaluationModel(id),
   });
 }

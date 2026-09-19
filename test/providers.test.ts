@@ -493,15 +493,13 @@ describe("Vercel provider timeout and abort", () => {
 
 describe("Vercel provider: credentials, model semantics, confidence, ZDR", () => {
   test("the custom environment credential is wired into the provider, not just validated", async () => {
-    // Use createVercelAdapter with a custom env and prove the key reaches the
-    // gateway: the gateway model instance records the Authorization header its
-    // fetch sends, which only happens when the key is bound via createGateway.
+    // End-to-end through createVercelAdapter(customEnv): the adapter builds its
+    // own gateway bound to the custom key, pointed at a local server via baseURL,
+    // so the Authorization header observed on the wire is the one from customEnv.
     const key = "vck_test_wiring_proof_1234";
-    const adapter = createVercelAdapter({ AI_GATEWAY_API_KEY: key });
-    assert.ok(adapter instanceof VercelJevProvider);
+    const customEnv = { AI_GATEWAY_API_KEY: key };
     // The provider must not mutate process.env while constructing.
     assert.equal(process.env.AI_GATEWAY_API_KEY, undefined);
-    // Drive one real fetch through the bound gateway: point it at a local server.
     const { createServer } = await import("node:http");
     const received: Array<{ auth: string | undefined; body: unknown; modelHeader: string | undefined }> = [];
     const server = createServer((req, res) => {
@@ -528,15 +526,10 @@ describe("Vercel provider: credentials, model semantics, confidence, ZDR", () =>
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
-    // The gateway instance inside the adapter was built with createGateway({apiKey});
-    // reconstruct the same wiring with a fetch that targets the local server.
-    const { createGateway, experimental_evaluate } = await import("ai");
-    const gateway = createGateway({ apiKey: key, baseURL: `http://127.0.0.1:${port}/v4/ai` });
-    const provider = new VercelJevProvider({
-      evaluate: experimental_evaluate as unknown as EvaluateFn,
-      modelFactory: (id) => gateway.evaluationModel(id),
+    const adapter = createVercelAdapter(customEnv, {
+      baseURL: `http://127.0.0.1:${port}/v4/ai`,
     });
-    const response = (await provider.ask(
+    const response = (await adapter.ask(
       {
         state: { text: "s" },
         questions: {
@@ -675,5 +668,35 @@ describe("Vercel provider: credentials, model semantics, confidence, ZDR", () =>
       ),
     );
     assert.equal(evaluations, 0); // no evaluation was started
+  });
+});
+
+describe("smoke environment gating", () => {
+  test("JEV_SMOKE accepts exactly 1/true/yes and rejects everything else", async () => {
+    const { checkEnvironment } = await import("../scripts/smoke-env.ts");
+    const key = { AI_GATEWAY_API_KEY: "vck_test", TYPESAFE_API_KEY: "tsk_test" };
+    const runs = (value: string | undefined) =>
+      checkEnvironment(
+        { ...(value === undefined ? {} : { JEV_SMOKE: value }), ...key },
+        {
+          provider: "vercel",
+        },
+      ).skip;
+    // Enabled only by an exact affirmative.
+    for (const yes of ["1", "true", "yes", "TRUE", "Yes"]) assert.equal(runs(yes), null, yes);
+    // "10" must NOT enable (the old /^1|true|yes$/ matched "starts with 1").
+    for (const no of ["0", "10", "false", "no", "11", "yes1", "true1", "", "on"]) {
+      assert.match(String(runs(no)), /set JEV_SMOKE=1/, no);
+    }
+    assert.match(String(runs(undefined)), /set JEV_SMOKE=1/);
+    // Missing credential still skips after the gate passes.
+    assert.match(
+      String(checkEnvironment({ JEV_SMOKE: "1" }, { provider: "vercel" }).skip),
+      /AI_GATEWAY_API_KEY is not set/,
+    );
+    assert.match(
+      String(checkEnvironment({ JEV_SMOKE: "1" }, { provider: "typesafe" }).skip),
+      /TYPESAFE_API_KEY is not set/,
+    );
   });
 });

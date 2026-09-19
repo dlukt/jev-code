@@ -11,7 +11,7 @@ export function checkEnvironment(
   env: NodeJS.ProcessEnv,
   options: { provider: "typesafe" | "vercel" },
 ): SkipVerdict {
-  if (!/^1|true|yes$/i.test(env.JEV_SMOKE ?? "")) {
+  if (!/^(?:1|true|yes)$/i.test(env.JEV_SMOKE ?? "")) {
     return { skip: "set JEV_SMOKE=1 to run live smoke tests" };
   }
   const key = options.provider === "vercel" ? env.AI_GATEWAY_API_KEY?.trim() : env.TYPESAFE_API_KEY?.trim();
