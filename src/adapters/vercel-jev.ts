@@ -3,7 +3,6 @@ import { experimental_evaluate as aiEvaluate, createGateway } from "ai";
 import { estimateTokens } from "../core/budget.ts";
 import type { Entry, Question, Questions } from "../core/questions.ts";
 import type { JevCallOptions, JevPort, JevRequest, TransportFailure } from "../core/types.ts";
-import { ValidationError } from "../core/validation.ts";
 import { MissingCredentialError } from "./jev.ts";
 
 export { MissingCredentialError };
@@ -69,6 +68,9 @@ export interface VercelJevProviderOptions {
  * process environment.
  */
 export class VercelJevProvider implements JevPort {
+  /** This port's error classifier, so callers can pair port and classifier. */
+  readonly classifyError: (error: unknown) => TransportFailure = classifyVercelError;
+
   private readonly evaluate: EvaluateFn;
   private readonly modelFactory: ModelFactory;
   private readonly model: string;
@@ -94,7 +96,7 @@ export class VercelJevProvider implements JevPort {
       options.timeoutMs,
     );
     const external = options.signal;
-    const forward = () => controller.abort(external?.reason);
+    const forward = () => controller.abort(aborted(external?.reason));
     external?.addEventListener("abort", forward, { once: true });
     const gatewayModel = gatewayModelFor(request.model, this.model);
     let result: Awaited<ReturnType<EvaluateFn>>;
@@ -111,18 +113,20 @@ export class VercelJevProvider implements JevPort {
       clearTimeout(timer);
       external?.removeEventListener("abort", forward);
     }
-    let answers: Record<string, unknown>;
+    // Malformed gateway answers (missing or wrong-typed) become an empty
+    // answer map: readEnvelope accepts the envelope and the frame parser then
+    // rejects it as a ValidationError, which is the executor's invalid-response
+    // path — the one that retries. Throwing here would instead take the
+    // transport-error path, which classifies as unknown and never retries.
+    let answers: Record<string, unknown> = {};
     try {
       answers = translateAnswers(
         request.questions,
         result.answers,
         typesafeConfidence(result.providerMetadata),
       );
-    } catch (error) {
-      // Malformed gateway answers are invalid model responses, not transport
-      // failures: surface them as validation errors so the executor's
-      // invalid-response retry path handles them instead of failing the frame.
-      throw new ValidationError(error instanceof Error ? error.message : String(error));
+    } catch {
+      // Deliberately answered by the empty map above.
     }
     return {
       model: result.response?.modelId ?? gatewayModel,
@@ -278,9 +282,15 @@ export function translateAnswers(
   return out;
 }
 
+/**
+ * An abort-typed error for any caller-supplied reason. Plain Error reasons
+ * would surface as unknown transport failures instead of "aborted".
+ */
 function aborted(reason: unknown): unknown {
-  if (reason instanceof Error) return reason;
-  return new DOMException("run aborted", "AbortError");
+  if (reason instanceof Error && /abort/i.test(reason.name)) return reason;
+  const detail =
+    reason instanceof Error ? reason.message : reason === undefined ? "run aborted" : String(reason);
+  return new DOMException(detail, "AbortError");
 }
 
 /** Map gateway and network errors onto transport failure classes. */

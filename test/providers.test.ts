@@ -23,8 +23,9 @@ import {
   VercelJevProvider,
 } from "../src/adapters/vercel-jev.ts";
 import { estimateTokens } from "../src/core/budget.ts";
+import { FrameExecutor } from "../src/core/executor.ts";
 import type { JevRequest, TransportFailure } from "../src/core/types.ts";
-import { ValidationError } from "../src/core/validation.ts";
+import { expectKeys, readEnvelope, readNoul } from "../src/core/validation.ts";
 import { check } from "../src/workflows/check.ts";
 import { fake, options, tempRepo } from "./helpers.ts";
 
@@ -229,35 +230,63 @@ describe("Vercel provider request translation", () => {
     assert.equal(response.model, "jev-1.13.0");
   });
 
-  test("missing per-question answers and type mismatches are rejected as validation errors", async () => {
-    const provider = new VercelJevProvider({
+  test("malformed gateway answers resolve to an invalid envelope for the executor's retry path", async () => {
+    // Missing and wrong-typed answers must NOT reject: a rejected ask() lands in
+    // the executor's transport-error block (classified unknown, never retried).
+    // An empty answer map makes readEnvelope succeed and the frame parser fail
+    // with a ValidationError — the invalid-response path that is retried.
+    const missing = new VercelJevProvider({
       evaluate: async () => ({ answers: {} }),
     });
-    await assert.rejects(
-      provider.ask(
-        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
-        CALL_OPTIONS,
-      ),
-      (error: unknown) => {
-        assert.ok(error instanceof ValidationError, "expected a ValidationError");
-        assert.match(error.message, /no answer for question "n"/);
-        return true;
-      },
-    );
+    const empty = (await missing.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, unknown> };
+    assert.deepEqual(empty.answers, {});
+    assert.doesNotThrow(() => readEnvelope(empty)); // valid envelope; parser fails instead
+
     const mismatch = new VercelJevProvider({
       evaluate: async () => ({ answers: { n: { type: "choice", choice: "x" } } }),
     });
-    await assert.rejects(
-      mismatch.ask(
-        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
-        CALL_OPTIONS,
-      ),
-      (error: unknown) => {
-        assert.ok(error instanceof ValidationError, "expected a ValidationError");
-        assert.match(error.message, /not a boolean answer/);
-        return true;
+    const alsoEmpty = (await mismatch.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, unknown> };
+    assert.deepEqual(alsoEmpty.answers, {});
+
+    // End-to-end through the executor: a frame with a validating parser gets
+    // its configured retries instead of failing on the first attempt.
+    let attempts = 0;
+    const port = new VercelJevProvider({
+      evaluate: async () => {
+        attempts++;
+        return { answers: {} };
       },
-    );
+    });
+    const frame = {
+      id: "f",
+      template: "t@1" as `${string}@${number}`,
+      scope: "s",
+      state: {},
+      questions: { q: { type: "noul", instructions: "?" } as const },
+      provenance: [],
+      parse(answers: Record<string, unknown>) {
+        expectKeys(answers, ["q"]);
+        return readNoul(answers, "q");
+      },
+    };
+    const executor = new FrameExecutor({
+      port,
+      model: "m",
+      budget: { requests: 10, inputTokens: 100_000, wallMs: 60_000 },
+      retries: 2,
+      retryDelayMs: () => 0,
+      classifyError: classifyVercelError,
+    });
+    const outcome = await executor.run(frame);
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, "invalid");
+    assert.equal(attempts, 3); // initial + two retries
   });
 
   test("choice distributions are padded with zero for unreported labels", async () => {
@@ -395,7 +424,7 @@ describe("provider-independent review behavior", () => {
         { task: "change x", scope: "worktree" },
         {
           ...options(r.root, adapter),
-          dependencies: createWorkflowDependencies(r.root, adapter, "vercel"),
+          dependencies: createWorkflowDependencies(r.root, adapter),
         },
       );
       assert.equal(packet.schema, "jev-code.packet/v1");
@@ -471,6 +500,27 @@ describe("Vercel provider timeout and abort", () => {
       ),
       /aborted/,
     );
+  });
+
+  test("a custom abort reason is normalized to an abort-typed error", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: (call) =>
+        new Promise((_resolve, reject) => {
+          call.abortSignal?.addEventListener("abort", () => reject(call.abortSignal?.reason), {
+            once: true,
+          });
+        }),
+    });
+    const controller = new AbortController();
+    const pending = provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      { timeoutMs: 5_000, signal: controller.signal },
+    );
+    controller.abort(new Error("cancelled by caller"));
+    await assert.rejects(pending, (error: unknown) => {
+      assert.equal(classifyVercelError(error), "aborted");
+      return true;
+    });
   });
 
   test("an external abort signal is forwarded", async () => {
@@ -628,24 +678,20 @@ describe("Vercel provider: credentials, model semantics, confidence, ZDR", () =>
       evaluate: async () => ({ answers: {} }),
     });
     // Unqualified (TypeSafe-direct namespace) -> configured gateway model.
-    await assert.rejects(
-      provider.ask(
-        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "jev-1.13.0" },
-        CALL_OPTIONS,
-      ),
-      /no answer/,
+    // (The empty-answer envelope resolves instead of rejecting; translation
+    // failures are invalid responses, not transport errors.)
+    await provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "jev-1.13.0" },
+      CALL_OPTIONS,
     );
     // Qualified (gateway namespace) -> passed through.
-    await assert.rejects(
-      provider.ask(
-        {
-          state: {},
-          questions: { n: { type: "noul", instructions: "?" } },
-          model: "typesafe-ai/jev-preview",
-        },
-        CALL_OPTIONS,
-      ),
-      /no answer/,
+    await provider.ask(
+      {
+        state: {},
+        questions: { n: { type: "noul", instructions: "?" } },
+        model: "typesafe-ai/jev-preview",
+      },
+      CALL_OPTIONS,
     );
     assert.deepEqual(seen, [GATEWAY_MODEL, "typesafe-ai/jev-preview"]);
   });
@@ -659,12 +705,9 @@ describe("Vercel provider: credentials, model semantics, confidence, ZDR", () =>
         return { answers: {} };
       },
     });
-    await assert.rejects(
-      provider.ask(
-        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
-        CALL_OPTIONS,
-      ),
-      /no answer/,
+    await provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      CALL_OPTIONS,
     );
     assert.equal(seen[0]!.providerOptions, undefined);
   });

@@ -9,9 +9,9 @@ import type {
   WorkspaceSource,
 } from "../workflows/ports.ts";
 import { parseComments } from "./comments.ts";
-import { classifierFor, DEFAULT_PROVIDER, type ProviderName } from "./config.ts";
 import { parseUnifiedDiff } from "./diff.ts";
 import { collectDiff, trackedFiles } from "./git.ts";
+import { classifyError } from "./jev.ts";
 import { parseFailureLog } from "./logs.ts";
 import { readLines, resolveWorkspacePath } from "./paths.ts";
 import { Recorder } from "./recorder.ts";
@@ -66,7 +66,7 @@ export function createRunId(workflow: string): string {
 export function createWorkflowDependencies(
   root: string,
   jev: JevPort,
-  classify: ProviderName | ((error: unknown) => TransportFailure) = DEFAULT_PROVIDER,
+  classify?: (error: unknown) => TransportFailure,
 ): WorkflowDependencies {
   return {
     jev,
@@ -74,7 +74,17 @@ export function createWorkflowDependencies(
     evidence: createEvidenceParser(),
     redaction: createRedaction(),
     artifacts: createArtifactStore(root),
-    classifyError: typeof classify === "string" ? classifierFor(classify) : classify,
+    // Prefer the classifier the port itself declares, so a provider-aware
+    // port can never be paired with a foreign classifier by default.
+    classifyError: classify ?? defaultClassifierFor(jev),
     createRunId,
   };
+}
+
+/** The port's own classifier, or the TypeSafe default for plain ports. */
+function defaultClassifierFor(jev: JevPort): (error: unknown) => TransportFailure {
+  const candidate = (jev as { classifyError?: unknown }).classifyError;
+  return typeof candidate === "function"
+    ? (candidate as (error: unknown) => TransportFailure)
+    : classifyError;
 }
