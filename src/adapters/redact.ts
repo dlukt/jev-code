@@ -108,8 +108,11 @@ export function envSecrets(env: NodeJS.ProcessEnv = process.env): string[] {
  * process environment: a custom environment must not silently lose redaction
  * of the process's credentials (or vice versa) just because it was passed in.
  */
-export function createRedaction(env: NodeJS.ProcessEnv = process.env): RedactionPort {
-  const secrets = [...new Set([...envSecrets(env), ...envSecrets()])];
+export function createRedaction(
+  env: NodeJS.ProcessEnv = process.env,
+  extraSecrets: readonly string[] = [],
+): RedactionPort {
+  const secrets = [...new Set([...envSecrets(env), ...envSecrets(), ...extraSecrets])];
   return {
     json: <T extends JsonValue>(value: T) => redactJson(value, secrets) as { value: T; count: number },
     text: (value: string) => redactText(value, secrets),

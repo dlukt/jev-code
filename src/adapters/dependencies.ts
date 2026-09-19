@@ -72,7 +72,7 @@ export function createWorkflowDependencies(
     jev,
     source: createWorkspaceSource(root),
     evidence: createEvidenceParser(),
-    redaction: createRedaction(env),
+    redaction: createRedaction(env, portSecrets(jev)),
     artifacts: createArtifactStore(root),
     // Prefer the classifier the port itself declares, so a provider-aware
     // port can never be paired with a foreign classifier by default.
@@ -80,6 +80,8 @@ export function createWorkflowDependencies(
     createRunId,
   };
 }
+
+import { portSecrets } from "./jev.ts";
 
 /** The port's own classifier (bound to the port), or the TypeSafe default. */
 function defaultClassifierFor(jev: JevPort): (error: unknown) => TransportFailure {

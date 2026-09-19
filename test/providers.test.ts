@@ -266,6 +266,23 @@ describe("Vercel provider request translation", () => {
     assert.deepEqual(response.answers.c?.probabilities, { a: 1, b: 0 });
   });
 
+  test("the two-argument composition redacts the custom-env credential via the port", async () => {
+    // createWorkflowDependencies(root, port) must scrub a credential that only
+    // the port knows (custom env): the port now exposes credentialSecrets and
+    // dependency redaction unions them in.
+    const customEnv = { AI_GATEWAY_API_KEY: "vck_portlevel_secret_0123456789" };
+    const port = createVercelAdapter(customEnv, { evaluate: async () => ({ answers: {} }) });
+    const dependencies = createWorkflowDependencies("/tmp/jev-two-arg-root", port);
+    const out = dependencies.redaction.text("key vck_portlevel_secret_0123456789 leaked");
+    assert.equal(out.text.includes("vck_portlevel_secret_0123456789"), false);
+    assert.match(out.text, /\[REDACTED:env_secret\]/);
+    // The TypeSafe port does the same.
+    const typesafe = new TypeSafeJevProvider({ apiKey: "tsk_portlevel_secret_0123456789" });
+    const deps2 = createWorkflowDependencies("/tmp/jev-two-arg-root-2", typesafe);
+    const out2 = deps2.redaction.text("key tsk_portlevel_secret_0123456789 leaked");
+    assert.equal(out2.text.includes("tsk_portlevel_secret_0123456789"), false);
+  });
+
   test("a custom environment's gateway key is redacted alongside the process env", async () => {
     const customEnv = { AI_GATEWAY_API_KEY: "vck_custom_secret_key_0123456789" };
     const redaction = createRedaction(customEnv);

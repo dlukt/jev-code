@@ -26,14 +26,17 @@ export interface TypeSafeJevProviderOptions {
  * Authentication and the TypeSafe wire format stay inside this class.
  */
 export class TypeSafeJevProvider implements JevPort {
+  /** Credential values used by this port; consumed by dependency redaction. */
+  readonly credentialSecrets: string[];
+
   private readonly client: TypeSafeClientLike;
 
   constructor(options: TypeSafeJevProviderOptions) {
     // Retries are owned by the executor so they count against run budgets; SDK logging is
     // disabled because debug logging would include request bodies.
-    this.client =
-      options.client ??
-      new TypeSafeClient({ apiKey: options.apiKey, retry: { maxRetries: 0 }, logLevel: "off" });
+    const apiKey = options.apiKey;
+    this.client = options.client ?? new TypeSafeClient({ apiKey, retry: { maxRetries: 0 }, logLevel: "off" });
+    this.credentialSecrets = apiKey.trim().length >= 8 ? [apiKey.trim()] : [];
   }
 
   async ask(request: JevRequest, options: JevCallOptions): Promise<unknown> {
@@ -49,6 +52,12 @@ export function createSdkAdapter(env: NodeJS.ProcessEnv = process.env): JevPort 
   const apiKey = env.TYPESAFE_API_KEY?.trim();
   if (!apiKey) throw new MissingCredentialError();
   return new TypeSafeJevProvider({ apiKey });
+}
+
+/** The port's own credential values, so redaction never depends on env visibility. */
+export function portSecrets(jev: JevPort): string[] {
+  const candidate = (jev as { credentialSecrets?: unknown }).credentialSecrets;
+  return Array.isArray(candidate) ? candidate.filter((v): v is string => typeof v === "string") : [];
 }
 
 /** Map provider and network errors onto transport failure classes. */

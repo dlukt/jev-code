@@ -59,6 +59,8 @@ export interface VercelJevProviderOptions {
   model?: string;
   /** Routes only to providers with zero data retention agreements. Default: true. */
   zeroDataRetention?: boolean;
+  /** Credential values used by this port; consumed by dependency redaction. */
+  credentialSecrets?: string[];
 }
 
 /**
@@ -71,6 +73,9 @@ export class VercelJevProvider implements JevPort {
   /** This port's error classifier, so callers can pair port and classifier. */
   readonly classifyError: (error: unknown) => TransportFailure = classifyVercelError;
 
+  /** Credential values used by this port; consumed by dependency redaction. */
+  readonly credentialSecrets: string[];
+
   private readonly evaluate: EvaluateFn;
   private readonly modelFactory: ModelFactory;
   private readonly model: string;
@@ -81,6 +86,7 @@ export class VercelJevProvider implements JevPort {
     this.modelFactory = options.modelFactory ?? ((id) => id);
     this.model = options.model ?? GATEWAY_MODEL;
     this.zeroDataRetention = options.zeroDataRetention ?? true;
+    this.credentialSecrets = options.credentialSecrets ?? [];
   }
 
   async ask(request: JevRequest, options: JevCallOptions): Promise<unknown> {
@@ -169,6 +175,7 @@ export function createVercelAdapter(
   return new VercelJevProvider({
     model,
     zeroDataRetention,
+    credentialSecrets: apiKey.trim().length >= 8 ? [apiKey.trim()] : [],
     ...(options.evaluate ? { evaluate: options.evaluate } : {}),
     modelFactory: (id) => gateway.evaluationModel(id),
   });
