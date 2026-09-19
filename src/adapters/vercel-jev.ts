@@ -281,9 +281,10 @@ export function translateAnswers(
       if (answer.type !== "score") throw new Error(`answer "${name}" is not a score answer`);
       const probabilities = answer.probabilities ?? {};
       const levelCount = question.criteria.length;
-      const extraLevels = Object.keys(probabilities).filter(
-        (key) => Number.isNaN(Number(key)) || Number(key) < 0 || Number(key) >= levelCount,
-      );
+      // Exact canonical keys only: Number("1.5")/Number("01")/Number("1e0")
+      // would coerce into range and get silently dropped otherwise.
+      const canonicalLevels = Array.from({ length: levelCount }, (_, i) => String(i));
+      const extraLevels = Object.keys(probabilities).filter((key) => !canonicalLevels.includes(key));
       if (extraLevels.length > 0) {
         throw new Error(
           `answer "${name}" carries probabilities for unknown score levels: ${extraLevels.join(", ")}`,

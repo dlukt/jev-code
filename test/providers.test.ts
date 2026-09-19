@@ -247,6 +247,45 @@ describe("Vercel provider request translation", () => {
     assert.deepEqual(response.answers, {});
   });
 
+  test("noncanonical score keys like '1.5', '01', '1e0' reject", async () => {
+    for (const key of ["1.5", "01", "1e0"]) {
+      const provider = new VercelJevProvider({
+        evaluate: async () => ({
+          answers: { s: { type: "score", score: 1, probabilities: { 0: 0.5, 1: 0.5, [key]: 0.9 } } },
+        }),
+      });
+      const response = (await provider.ask(
+        {
+          state: {},
+          questions: { s: { type: "score", instructions: "?", criteria: [null, null] } },
+          model: "m",
+        },
+        CALL_OPTIONS,
+      )) as { answers: Record<string, unknown> };
+      assert.deepEqual(response.answers, {}, key);
+    }
+  });
+
+  test("classifier methods read instance state through the dependencies layer", async () => {
+    // A method-style classifyError on the port must keep its `this` when
+    // invoked as dependencies.classifyError(error).
+    const stateful = {
+      async ask() {
+        return {};
+      },
+      failWith() {
+        return new Error("boom");
+      },
+      classifyError(this: { failWith(): Error }, error: unknown) {
+        // Throws when `this` is wrong (dependencies object has no failWith).
+        if (error === "probe") return this.failWith().message === "boom" ? "aborted" : "unknown";
+        return "unknown";
+      },
+    } as unknown as import("../src/core/types.ts").JevPort;
+    const dependencies = createWorkflowDependencies("/tmp/jev-test-root", stateful);
+    assert.equal(dependencies.classifyError("probe"), "aborted");
+  });
+
   test("extra probability labels reject instead of being dropped", async () => {
     const provider = new VercelJevProvider({
       evaluate: async () => ({

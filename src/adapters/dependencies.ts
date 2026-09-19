@@ -81,10 +81,12 @@ export function createWorkflowDependencies(
   };
 }
 
-/** The port's own classifier, or the TypeSafe default for plain ports. */
+/** The port's own classifier (bound to the port), or the TypeSafe default. */
 function defaultClassifierFor(jev: JevPort): (error: unknown) => TransportFailure {
   const candidate = (jev as { classifyError?: unknown }).classifyError;
+  // Bind so a method-style classifier keeps the port as `this` when invoked
+  // through the dependencies object.
   return typeof candidate === "function"
-    ? (candidate as (error: unknown) => TransportFailure)
+    ? (candidate as (this: JevPort, error: unknown) => TransportFailure).bind(jev)
     : classifyError;
 }
