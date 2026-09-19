@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
-import type { JevPort } from "../core/types.ts";
+import type { JevPort, TransportFailure } from "../core/types.ts";
 import type {
   ArtifactStore,
   EvidenceParser,
@@ -63,14 +63,18 @@ export function createRunId(workflow: string): string {
 }
 
 /** Every workflow port implemented for a local workspace. */
-export function createWorkflowDependencies(root: string, jev: JevPort): WorkflowDependencies {
+export function createWorkflowDependencies(
+  root: string,
+  jev: JevPort,
+  classify: (error: unknown) => TransportFailure = classifyError,
+): WorkflowDependencies {
   return {
     jev,
     source: createWorkspaceSource(root),
     evidence: createEvidenceParser(),
     redaction: createRedaction(),
     artifacts: createArtifactStore(root),
-    classifyError,
+    classifyError: classify,
     createRunId,
   };
 }

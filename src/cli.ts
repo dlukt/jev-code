@@ -2,12 +2,19 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { configuredModel, jevFromEnvironment, MODEL_ENV } from "./adapters/config.ts";
+import {
+  configuredModel,
+  InvalidProviderError,
+  jevFromEnvironment,
+  MODEL_ENV,
+  PROVIDER_ENV,
+} from "./adapters/config.ts";
 import { createWorkflowDependencies } from "./adapters/dependencies.ts";
 import { GitError, repoRoot } from "./adapters/git.ts";
-import { MissingCredentialError } from "./adapters/jev.ts";
+import { classifyError, MissingCredentialError } from "./adapters/jev.ts";
 import { readStdin, readWorkspaceFile } from "./adapters/paths.ts";
 import { safeMessage } from "./adapters/redact.ts";
+import { classifyVercelError } from "./adapters/vercel-jev.ts";
 import { EXIT, exitCodeFor, renderHuman } from "./cli/output.ts";
 import { WORKFLOWS, type WorkflowDefinition } from "./cli/registry.ts";
 import { type InputShape, routeIntent, type WorkflowName } from "./cli/router.ts";
@@ -174,7 +181,8 @@ Exit codes: 0 complete; 10 incomplete coverage; 12 budget exhausted;
             64 usage or clarification; 65 invalid input; 70 internal error
 Results are advisory. jev-code never edits code, runs tests, posts comments, or approves work.
 Every report lists what was not checked. "No flags" is not an approval.
-TYPESAFE_API_KEY is required and read from the process environment only.
+Jev provider: JEV_PROVIDER=typesafe (default, needs TYPESAFE_API_KEY) or
+              JEV_PROVIDER=vercel (Vercel AI Gateway, needs AI_GATEWAY_API_KEY).
 `;
 }
 
@@ -280,7 +288,12 @@ export async function runCli(
 
     const jev = injected.adapter ?? jevFromEnvironment(io.env);
     const root = typeof v.repo === "string" ? await repoRoot(v.repo) : await repoRoot(io.cwd);
-    const dependencies = createWorkflowDependencies(root, jev);
+    const provider = io.env[PROVIDER_ENV]?.trim() || "typesafe";
+    const dependencies = createWorkflowDependencies(
+      root,
+      jev,
+      provider === "vercel" ? classifyVercelError : classifyError,
+    );
     const model = configuredModel(v.model as string | undefined, io.env);
     const options: RunOptions = {
       root,
@@ -457,7 +470,9 @@ export async function runCli(
     return exitCodeFor(packet);
   } catch (error) {
     const usage =
-      error instanceof UsageError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS");
+      error instanceof UsageError ||
+      error instanceof InvalidProviderError ||
+      (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS");
     const input =
       error instanceof MissingCredentialError || error instanceof InputError || error instanceof GitError;
     const code = usage ? EXIT.usage : input ? EXIT.input : EXIT.internal;
