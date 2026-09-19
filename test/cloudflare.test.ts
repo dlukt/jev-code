@@ -151,6 +151,27 @@ describe("cloudflare provider selection", () => {
     assert.deepEqual(seen, ["Bearer alias-token-1234567890"]);
   });
 
+  test("a whitespace-only alias falls back to the canonical token", async () => {
+    const seen: string[] = [];
+    const fetchFn = (input: string, init: RequestInit) => {
+      seen.push(String((init.headers as Record<string, string>).Authorization));
+      return Promise.resolve(new Response(JSON.stringify(envelope(jevResult())), { status: 200 }));
+    };
+    const adapter = createCloudflareAdapter(
+      {
+        CLOUDFLARE_ACCOUNT_ID: "acc",
+        CLOUDFLARE_API_TOKEN: "canonical-token-9876543210",
+        JEV_CLOUDFLARE_API_TOKEN: "   ",
+      },
+      { fetchFn },
+    );
+    await adapter.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      CALL_OPTIONS,
+    );
+    assert.deepEqual(seen, ["Bearer canonical-token-9876543210"]);
+  });
+
   test("classifierFor maps cloudflare to its classifier", () => {
     assert.equal(classifierFor("cloudflare"), classifyCloudflareError);
   });
@@ -639,6 +660,28 @@ describe("cloudflare error classification", () => {
     assert.equal(classifyCloudflareError(reset), "transient");
   });
 
+  test("body-read socket failures (TypeError: terminated, UND_ERR_SOCKET) classify as transient", () => {
+    // Undici rejects body reads after headers as "terminated" with a
+    // SocketError cause carrying code UND_ERR_SOCKET — a genuine network
+    // interruption that must retry, not classify as unknown.
+    const terminated = new TypeError("terminated");
+    (terminated as unknown as { cause: unknown }).cause = Object.assign(new Error("other side closed"), {
+      name: "SocketError",
+      code: "UND_ERR_SOCKET",
+    });
+    assert.equal(classifyCloudflareError(terminated), "transient");
+    const socketOnly = new TypeError("terminated");
+    (socketOnly as unknown as { cause: unknown }).cause = Object.assign(new Error("socket"), {
+      code: "UND_ERR_SOCKET",
+    });
+    assert.equal(classifyCloudflareError(socketOnly), "transient");
+    const nameOnly = new TypeError("terminated");
+    (nameOnly as unknown as { cause: unknown }).cause = Object.assign(new Error("socket"), {
+      name: "SocketError",
+    });
+    assert.equal(classifyCloudflareError(nameOnly), "transient");
+  });
+
   test("timeout surfaces as a thrown timeout-typed abort that classifies aborted/transient correctly", async () => {
     const provider = new CloudflareJevProvider({
       accountId: "a",
@@ -708,6 +751,69 @@ describe("cloudflare error classification", () => {
     });
   });
 
+  test("a timeout during a stalled response body aborts the read", async () => {
+    // fetch resolves on headers; the body never arrives. The timeout must stay
+    // armed through response.text() or the call hangs past timeoutMs.
+    const provider = new CloudflareJevProvider({
+      accountId: "a",
+      apiToken: "t1234567890",
+      fetchFn: (input, init) =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                init.signal?.addEventListener(
+                  "abort",
+                  () => controller.error(init.signal?.reason ?? new Error("aborted")),
+                  { once: true },
+                );
+                // deliberately never enqueue: headers sent, body stalled
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        ),
+    });
+    const started = Date.now();
+    await assert.rejects(
+      provider.ask(
+        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+        { timeoutMs: 100 },
+      ),
+      /timed out|aborted/i,
+    );
+    assert.ok(Date.now() - started < 2_000, "the stalled body must not hang the call");
+  });
+
+  test("an external abort during a stalled response body aborts the read", async () => {
+    const provider = new CloudflareJevProvider({
+      accountId: "a",
+      apiToken: "t1234567890",
+      fetchFn: (input, init) =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                init.signal?.addEventListener(
+                  "abort",
+                  () => controller.error(init.signal?.reason ?? new Error("aborted")),
+                  { once: true },
+                );
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        ),
+    });
+    const caller = new AbortController();
+    const pending = provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      { timeoutMs: 30_000, signal: caller.signal },
+    );
+    caller.abort(new Error("cancelled by caller"));
+    await assert.rejects(pending, /cancelled by caller|aborted/i);
+  });
+
   test("a network failure rejects as a transport error", async () => {
     const provider = new CloudflareJevProvider({
       accountId: "a",
@@ -743,6 +849,25 @@ describe("cloudflare error classification", () => {
 });
 
 describe("cloudflare credential redaction", () => {
+  test("a directly-constructed provider registers its own token for redaction", () => {
+    // Not via the factory: the port itself owns the credential, so the
+    // two-argument dependency composition can scrub it.
+    const token = "cft_direct_secret_token_0123456789";
+    const provider = new CloudflareJevProvider({ accountId: "acc", apiToken: token });
+    assert.deepEqual(provider.credentialSecrets, [token]);
+    const dependencies = createWorkflowDependencies("/tmp/jev-cf-direct-root", provider);
+    const out = dependencies.redaction.text(`token ${token} leaked`);
+    assert.equal(out.text.includes(token), false);
+    assert.match(out.text, /\[REDACTED:env_secret\]/);
+    // An explicit credentialSecrets override still wins.
+    const overridden = new CloudflareJevProvider({
+      accountId: "acc",
+      apiToken: token,
+      credentialSecrets: [],
+    });
+    assert.deepEqual(overridden.credentialSecrets, []);
+  });
+
   test("the two-argument composition redacts the custom-env token via the port", () => {
     const customEnv = {
       CLOUDFLARE_ACCOUNT_ID: "acc",
@@ -813,6 +938,7 @@ describe("cloudflare provider through the CLI", () => {
   test("JEV_PROVIDER=cloudflare with credentials reaches the workflow layer", async () => {
     // A temp repo with a diff, routing through the real CLI path, network mocked
     // by a local server that the adapter targets via CLOUDFLARE_BASE_URL.
+    let requests = 0;
     const r = (await import("./helpers.ts")).tempRepo();
     try {
       r.write({ "src/a.ts": "export const a = 1;\n" });
@@ -822,8 +948,17 @@ describe("cloudflare provider through the CLI", () => {
         let data = "";
         req.on("data", (chunk: string) => (data += chunk));
         req.on("end", () => {
+          requests++;
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify(envelope(jevResult())));
+          res.end(
+            JSON.stringify(
+              envelope(
+                jevResult({
+                  answers: { n: { type: "noul", noul: 0.9 } },
+                }),
+              ),
+            ),
+          );
         });
       });
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -843,9 +978,12 @@ describe("cloudflare provider through the CLI", () => {
         },
       });
       server.close();
-      // The workflow must get past provider construction (no credential error).
+      // The workflow must get past provider construction (no credential error)
+      // and actually route through the local server — the env override is the
+      // only base URL the factory honors.
       assert.notEqual(code, 65);
       assert.doesNotMatch(stderr, /CLOUDFLARE/);
+      assert.ok(requests > 0, "the CLI run must exercise the local server");
     } finally {
       r.cleanup();
     }

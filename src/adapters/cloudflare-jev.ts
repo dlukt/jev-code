@@ -95,7 +95,10 @@ export class CloudflareJevProvider implements JevPort {
     this.baseURL = options.baseURL ?? CLOUDFLARE_API_BASE_URL;
     this.model = options.model ?? CLOUDFLARE_MODEL;
     this.fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init));
-    this.credentialSecrets = options.credentialSecrets ?? [];
+    // The port owns its credentials even when constructed directly (not via
+    // the factory), so redaction never depends on env visibility.
+    this.credentialSecrets =
+      options.credentialSecrets ?? (options.apiToken.trim().length >= 8 ? [options.apiToken.trim()] : []);
   }
 
   async ask(request: JevRequest, options: JevCallOptions): Promise<unknown> {
@@ -115,27 +118,34 @@ export class CloudflareJevProvider implements JevPort {
     const forward = () => controller.abort(aborted(external?.reason));
     external?.addEventListener("abort", forward, { once: true });
     const cloudflareModel = cloudflareModelFor(request.model, this.model);
-    let response: Response;
+    let payload: JevPayload | null;
     try {
-      response = await this.fetchFn(`${this.baseURL}/accounts/${encodeURIComponent(this.accountId)}/ai/run`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiToken}`,
-          "Content-Type": "application/json",
+      // The timer and the external-abort forwarding must stay armed until the
+      // response BODY is consumed: fetch() resolves on headers alone, so a
+      // stalled body would otherwise hang past timeoutMs and ignore aborts.
+      const response = await this.fetchFn(
+        `${this.baseURL}/accounts/${encodeURIComponent(this.accountId)}/ai/run`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.apiToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: cloudflareModel,
+            input: { state: request.state, questions: request.questions },
+          }),
+          signal: controller.signal,
         },
-        body: JSON.stringify({
-          model: cloudflareModel,
-          input: { state: request.state, questions: request.questions },
-        }),
-        signal: controller.signal,
-      });
+      );
+      // Read and classify transport-level failures (HTTP errors, non-JSON
+      // body, failed execution state). These throw so the executor
+      // classifies them.
+      payload = await readCloudflareResponse(response);
     } finally {
       clearTimeout(timer);
       external?.removeEventListener("abort", forward);
     }
-    // Read and classify transport-level failures (HTTP errors, non-JSON body,
-    // failed execution state). These throw so the executor classifies them.
-    const payload = await readCloudflareResponse(response);
     // Malformed Jev payloads must NOT throw out of port.ask(): a rejection
     // lands in the executor's transport-error block (classified unknown, never
     // retried). An empty answer map lets readEnvelope accept the envelope and
@@ -476,13 +486,30 @@ export interface CloudflareAdapterEnv {
   CLOUDFLARE_API_TOKEN?: string | undefined;
   JEV_CLOUDFLARE_API_TOKEN?: string | undefined;
   JEV_CLOUDFLARE_MODEL?: string | undefined;
+  CLOUDFLARE_BASE_URL?: string | undefined;
 }
+
+/**
+ * The Cloudflare API token: the application-specific alias
+ * `JEV_CLOUDFLARE_API_TOKEN` wins, but only when it carries a non-blank
+ * value — a whitespace-only alias falls back to the canonical
+ * `CLOUDFLARE_API_TOKEN` instead of shadowing it.
+ */
+export function resolveCloudflareToken(env: CloudflareAdapterEnv): string | undefined {
+  const alias = env.JEV_CLOUDFLARE_API_TOKEN?.trim();
+  if (alias) return alias;
+  return env.CLOUDFLARE_API_TOKEN?.trim() || undefined;
+}
+
+/** Environment override for the Cloudflare API base URL (e.g. a proxy). */
+export const CLOUDFLARE_BASE_URL_ENV = "CLOUDFLARE_BASE_URL";
 
 /**
  * Build the Cloudflare-backed Jev port. The account id and API token are read
  * only from the given environment; `JEV_CLOUDFLARE_API_TOKEN` is an
  * application-specific alias that wins over the canonical
- * `CLOUDFLARE_API_TOKEN` when both are set.
+ * `CLOUDFLARE_API_TOKEN` when both are set. `CLOUDFLARE_BASE_URL` overrides
+ * the API base URL for every caller of the factory, including the CLI.
  */
 export function createCloudflareAdapter(
   env: CloudflareAdapterEnv | NodeJS.ProcessEnv = process.env,
@@ -494,18 +521,19 @@ export function createCloudflareAdapter(
       "CLOUDFLARE_ACCOUNT_ID is required; set it in the process environment before running jev-code with JEV_PROVIDER=cloudflare",
     );
   }
-  const apiToken = (env.JEV_CLOUDFLARE_API_TOKEN ?? env.CLOUDFLARE_API_TOKEN)?.trim();
+  const apiToken = resolveCloudflareToken(env);
   if (!apiToken) {
     throw new MissingCredentialError(
       "CLOUDFLARE_API_TOKEN is required; set it in the process environment before running jev-code with JEV_PROVIDER=cloudflare",
     );
   }
   const model = env[CLOUDFLARE_MODEL_ENV]?.trim() || CLOUDFLARE_MODEL;
+  const baseURL = options.baseURL ?? env[CLOUDFLARE_BASE_URL_ENV]?.trim();
   return new CloudflareJevProvider({
     accountId,
     apiToken,
     model,
-    ...(options.baseURL ? { baseURL: options.baseURL } : {}),
+    ...(baseURL ? { baseURL } : {}),
     ...(options.fetchFn ? { fetchFn: options.fetchFn } : {}),
     credentialSecrets: apiToken.trim().length >= 8 ? [apiToken.trim()] : [],
   });
@@ -545,12 +573,24 @@ export function classifyCloudflareError(error: unknown): TransportFailure {
     typeof cause === "object" && cause !== null && "message" in cause
       ? String((cause as { message: unknown }).message).toLowerCase()
       : "";
+  const causeCode =
+    typeof cause === "object" && cause !== null && "code" in cause
+      ? String((cause as { code: unknown }).code)
+      : "";
+  const causeName =
+    typeof cause === "object" && cause !== null && "name" in cause
+      ? String((cause as { name: unknown }).name)
+      : "";
   // Plain connection failures (TypeError: fetch failed with ECONNREFUSED etc.
-  // on `cause`) must retry like other transient transport problems.
+  // on `cause`) must retry like other transient transport problems. Body-read
+  // socket failures reject as `TypeError: terminated` with an Undici cause
+  // (SocketError / UND_ERR_SOCKET) after headers already arrived.
   const connectionFailure =
-    /fetch failed|network|connection/.test(name.toLowerCase()) ||
+    /fetch failed|network|connection|terminated/.test(name.toLowerCase()) ||
     /econnrefused|enotfound|eai_again|econnreset|epipe/.test(message) ||
-    /econnrefused|enotfound|eai_again|econnreset|epipe/.test(causeMessage);
+    /econnrefused|enotfound|eai_again|econnreset|epipe/.test(causeMessage) ||
+    causeCode === "UND_ERR_SOCKET" ||
+    causeName === "SocketError";
   if (
     status === 408 ||
     status === 429 ||
