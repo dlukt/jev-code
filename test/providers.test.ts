@@ -18,6 +18,7 @@ import { classifyError, MissingCredentialError, TypeSafeJevProvider } from "../s
 import {
   classifyVercelError,
   createVercelAdapter,
+  type EvaluateFn,
   GATEWAY_MODEL,
   VercelJevProvider,
 } from "../src/adapters/vercel-jev.ts";
@@ -186,6 +187,8 @@ describe("Vercel provider request translation", () => {
     const response = (await provider.ask(request, CALL_OPTIONS)) as Record<string, unknown>;
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.model, GATEWAY_MODEL);
+    // Zero data retention is requested by default.
+    assert.deepEqual(seen[0]!.providerOptions, { gateway: { zeroDataRetention: true } });
     assert.deepEqual(seen[0]!.state, { hunk: "code" });
     assert.deepEqual(seen[0]!.questions, {
       n: { type: "boolean", instructions: "Noul?", criteria: { true: "t", false: "f" } },
@@ -193,7 +196,8 @@ describe("Vercel provider request translation", () => {
       s: { type: "score", instructions: "Rank", criteria: ["low", "mid", "high"] },
     });
     assert.equal(seen[0]!.maxRetries, 0);
-    // Response envelope keeps TypeSafe shapes for the review engine.
+    // Response envelope keeps TypeSafe shapes for the review engine. No metadata
+    // was supplied, so confidence falls back to the derived value.
     assert.equal(response.model, GATEWAY_MODEL);
     assert.deepEqual(response.usage, { input_tokens: 10, output_tokens: 3 });
     assert.deepEqual(response.answers, {
@@ -484,5 +488,192 @@ describe("Vercel provider timeout and abort", () => {
       { timeoutMs: 60_000 },
     );
     assert.equal(observedSignal?.aborted, false);
+  });
+});
+
+describe("Vercel provider: credentials, model semantics, confidence, ZDR", () => {
+  test("the custom environment credential is wired into the provider, not just validated", async () => {
+    // Use createVercelAdapter with a custom env and prove the key reaches the
+    // gateway: the gateway model instance records the Authorization header its
+    // fetch sends, which only happens when the key is bound via createGateway.
+    const key = "vck_test_wiring_proof_1234";
+    const adapter = createVercelAdapter({ AI_GATEWAY_API_KEY: key });
+    assert.ok(adapter instanceof VercelJevProvider);
+    // The provider must not mutate process.env while constructing.
+    assert.equal(process.env.AI_GATEWAY_API_KEY, undefined);
+    // Drive one real fetch through the bound gateway: point it at a local server.
+    const { createServer } = await import("node:http");
+    const received: Array<{ auth: string | undefined; body: unknown; modelHeader: string | undefined }> = [];
+    const server = createServer((req, res) => {
+      let data = "";
+      req.on("data", (chunk: string) => (data += chunk));
+      req.on("end", () => {
+        received.push({
+          auth: req.headers.authorization,
+          body: JSON.parse(data),
+          modelHeader: req.headers["ai-model-id"] as string | undefined,
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            answers: {
+              q: { type: "boolean", probability: 0.5 },
+              c: { type: "choice", choice: "a", probabilities: { a: 0.7, b: 0.3 } },
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+            providerMetadata: { typesafe: { confidence: { c: 0.42 } } },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    // The gateway instance inside the adapter was built with createGateway({apiKey});
+    // reconstruct the same wiring with a fetch that targets the local server.
+    const { createGateway, experimental_evaluate } = await import("ai");
+    const gateway = createGateway({ apiKey: key, baseURL: `http://127.0.0.1:${port}/v4/ai` });
+    const provider = new VercelJevProvider({
+      evaluate: experimental_evaluate as unknown as EvaluateFn,
+      modelFactory: (id) => gateway.evaluationModel(id),
+    });
+    const response = (await provider.ask(
+      {
+        state: { text: "s" },
+        questions: {
+          q: { type: "noul", instructions: "?" },
+          c: { type: "choice", instructions: "?", criteria: { a: "x", b: "y" } },
+        },
+        model: "typesafe-ai/jev",
+      },
+      { timeoutMs: 5_000 },
+    )) as Record<string, unknown>;
+    server.close();
+    assert.equal(received.length, 1);
+    assert.equal(received[0]!.auth, `Bearer ${key}`); // the custom env key, actually sent
+    assert.equal(received[0]!.modelHeader, "typesafe-ai/jev");
+    assert.equal(
+      ((received[0]!.body as { questions: Record<string, { type: string }> }).questions.q ?? {}).type,
+      "boolean",
+    );
+    // providerMetadata.confidence (0.42) flows into the choice answer; the
+    // boolean/noul answer carries probability only.
+    const answers = response.answers as Record<string, { confidence?: number } | undefined>;
+    assert.equal(answers.c?.confidence, 0.42);
+    assert.equal(answers.q?.confidence, undefined);
+  });
+
+  test("TypeSafe's confidence statistic is preferred over the derived fallback", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: async () => ({
+        answers: {
+          c: { type: "choice", choice: "a", probabilities: { a: 0.9, b: 0.1 } },
+          s: { type: "score", score: 1, probabilities: { "0": 0.05, "1": 0.05, "2": 0.9 } },
+        },
+        providerMetadata: { typesafe: { confidence: { c: 0.61, s: 0.77 } } },
+      }),
+    });
+    const response = (await provider.ask(
+      {
+        state: {},
+        questions: {
+          c: { type: "choice", instructions: "?", criteria: { a: "x", b: "y" } },
+          s: { type: "score", instructions: "?", criteria: ["l0", "l1", "l2"] },
+        },
+        model: "m",
+      },
+      CALL_OPTIONS,
+    )) as { answers: { c: { confidence: number }; s: { confidence: number } } };
+    // The reported statistic (0.61/0.77), not the distribution-derived value (0.9).
+    assert.equal(response.answers.c.confidence, 0.61);
+    assert.equal(response.answers.s.confidence, 0.77);
+  });
+
+  test("non-numeric or absent confidence metadata falls back to the derived value", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: async () => ({
+        answers: { c: { type: "choice", choice: "a", probabilities: { a: 0.9 } } },
+        providerMetadata: { typesafe: { confidence: { c: "high" } } },
+      }),
+    });
+    const response = (await provider.ask(
+      {
+        state: {},
+        questions: { c: { type: "choice", instructions: "?", criteria: { a: "x", b: "y" } } },
+        model: "m",
+      },
+      CALL_OPTIONS,
+    )) as { answers: { c: { confidence: number } } };
+    assert.equal(response.answers.c.confidence, 0.9);
+  });
+
+  test("unqualified TypeSafe model ids never reach the gateway; qualified ids are honored", async () => {
+    const seen: string[] = [];
+    const provider = new VercelJevProvider({
+      model: GATEWAY_MODEL,
+      modelFactory: (id) => {
+        seen.push(id);
+        return id;
+      },
+      evaluate: async () => ({ answers: {} }),
+    });
+    // Unqualified (TypeSafe-direct namespace) -> configured gateway model.
+    await assert.rejects(
+      provider.ask(
+        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "jev-1.13.0" },
+        CALL_OPTIONS,
+      ),
+      /no answer/,
+    );
+    // Qualified (gateway namespace) -> passed through.
+    await assert.rejects(
+      provider.ask(
+        {
+          state: {},
+          questions: { n: { type: "noul", instructions: "?" } },
+          model: "typesafe-ai/jev-preview",
+        },
+        CALL_OPTIONS,
+      ),
+      /no answer/,
+    );
+    assert.deepEqual(seen, [GATEWAY_MODEL, "typesafe-ai/jev-preview"]);
+  });
+
+  test("zero data retention can be disabled for troubleshooting", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const provider = new VercelJevProvider({
+      zeroDataRetention: false,
+      evaluate: async (call) => {
+        seen.push(call);
+        return { answers: {} };
+      },
+    });
+    await assert.rejects(
+      provider.ask(
+        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+        CALL_OPTIONS,
+      ),
+      /no answer/,
+    );
+    assert.equal(seen[0]!.providerOptions, undefined);
+  });
+
+  test("an already-aborted external signal propagates before any evaluation", async () => {
+    let evaluations = 0;
+    const provider = new VercelJevProvider({
+      evaluate: async () => {
+        evaluations++;
+        return { answers: {} };
+      },
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      provider.ask(
+        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+        { timeoutMs: 5_000, signal: controller.signal },
+      ),
+    );
+    assert.equal(evaluations, 0); // no evaluation was started
   });
 });

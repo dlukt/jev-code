@@ -1,12 +1,19 @@
-import { experimental_evaluate as aiEvaluate } from "ai";
+import type { Experimental_EvaluationModel } from "ai";
+import { experimental_evaluate as aiEvaluate, createGateway } from "ai";
 import type { Entry, Question, Questions } from "../core/questions.ts";
 import type { JevCallOptions, JevPort, JevRequest, TransportFailure } from "../core/types.ts";
 import { MissingCredentialError } from "./jev.ts";
 
 export { MissingCredentialError };
 
-/** Gateway model id for Jev on the Vercel AI Gateway. */
+/** Canonical Jev model id on the Vercel AI Gateway, verified against ai@7.0.107. */
 export const GATEWAY_MODEL = "typesafe-ai/jev";
+
+/** Environment override for the gateway model id used by the Vercel provider. */
+export const GATEWAY_MODEL_ENV = "JEV_GATEWAY_MODEL";
+
+/** Environment override for zero data retention; defaults to enabled. */
+export const ZERO_DATA_RETENTION_ENV = "JEV_GATEWAY_ZERO_DATA_RETENTION";
 
 /** Gateway evaluation questions: choice, score, and boolean (their name for noul). */
 export type GatewayQuestion =
@@ -19,41 +26,61 @@ export type GatewayAnswer =
   | { type: "score"; score: number; probabilities?: Record<string, number> }
   | { type: "boolean"; probability: number };
 
-/** The slice of `evaluate()` from the `ai` package that the provider needs. */
+/**
+ * The slice of `experimental_evaluate()` from the `ai` package that the provider
+ * needs. `model` is a gateway evaluation model instance (or a gateway model id
+ * string resolved through the default provider). `providerMetadata` carries
+ * provider-specific statistics such as TypeSafe's per-question confidence.
+ */
 export type EvaluateFn = (options: {
-  model: string;
+  model: string | Experimental_EvaluationModel;
   state: Entry;
   questions: Record<string, GatewayQuestion>;
   maxRetries: number;
   abortSignal?: AbortSignal;
+  providerOptions?: Record<string, unknown>;
 }) => Promise<{
   answers: Record<string, GatewayAnswer>;
   usage?: { inputTokens?: number; outputTokens?: number };
+  providerMetadata?: Record<string, unknown>;
   response?: { modelId?: string };
 }>;
 
+/** Builds the evaluation model for a gateway model id. */
+export type ModelFactory = (id: string) => string | Experimental_EvaluationModel;
+
 export interface VercelJevProviderOptions {
-  /** Performs one evaluation; defaults to `evaluate` from the `ai` package. */
+  /** Performs one evaluation; defaults to `experimental_evaluate` from the `ai` package. */
   evaluate?: EvaluateFn;
-  /** Gateway model id. */
+  /** Builds the model for a gateway id; defaults to a plain pass-through. */
+  modelFactory?: ModelFactory;
+  /** Default gateway model id; per-request slash-qualified ids override it. */
   model?: string;
+  /** Routes only to providers with zero data retention agreements. Default: true. */
+  zeroDataRetention?: boolean;
 }
 
 /**
  * Vercel AI Gateway Jev provider: one Jev port backed by the gateway evaluation
- * API (`typesafe-ai/jev`) instead of the TypeSafe API. Authentication stays in
- * the `ai` package, which reads AI_GATEWAY_API_KEY from the environment.
+ * API instead of the TypeSafe API. Authentication is bound by the model factory
+ * (createGateway({ apiKey }).evaluationModel(id)); nothing here reads the
+ * process environment.
  */
 export class VercelJevProvider implements JevPort {
   private readonly evaluate: EvaluateFn;
+  private readonly modelFactory: ModelFactory;
   private readonly model: string;
+  private readonly zeroDataRetention: boolean;
 
   constructor(options: VercelJevProviderOptions = {}) {
     this.evaluate = options.evaluate ?? (aiEvaluate as unknown as EvaluateFn);
+    this.modelFactory = options.modelFactory ?? ((id) => id);
     this.model = options.model ?? GATEWAY_MODEL;
+    this.zeroDataRetention = options.zeroDataRetention ?? true;
   }
 
   async ask(request: JevRequest, options: JevCallOptions): Promise<unknown> {
+    if (options.signal?.aborted) throw aborted(options.signal.reason);
     // The gateway evaluate API has no timeout parameter; enforce the executor's
     // timeout by aborting the shared signal, which surfaces as a TimeoutError.
     const controller = new AbortController();
@@ -70,11 +97,12 @@ export class VercelJevProvider implements JevPort {
     let result: Awaited<ReturnType<EvaluateFn>>;
     try {
       result = await this.evaluate({
-        model: this.model,
+        model: this.modelFactory(gatewayModelFor(request.model, this.model)),
         state: request.state as Entry,
         questions: translateQuestions(request.questions),
         maxRetries: 0,
         abortSignal: controller.signal,
+        ...(this.zeroDataRetention ? { providerOptions: { gateway: { zeroDataRetention: true } } } : {}),
       });
     } finally {
       clearTimeout(timer);
@@ -82,7 +110,11 @@ export class VercelJevProvider implements JevPort {
     }
     return {
       model: result.response?.modelId ?? this.model,
-      answers: translateAnswers(request.questions, result.answers),
+      answers: translateAnswers(
+        request.questions,
+        result.answers,
+        typesafeConfidence(result.providerMetadata),
+      ),
       usage: {
         input_tokens: result.usage?.inputTokens ?? 0,
         output_tokens: result.usage?.outputTokens ?? 0,
@@ -98,7 +130,36 @@ export function createVercelAdapter(env: NodeJS.ProcessEnv = process.env): JevPo
     throw new MissingCredentialError(
       "AI_GATEWAY_API_KEY is required; set it in the process environment before running jev-code with JEV_PROVIDER=vercel",
     );
-  return new VercelJevProvider();
+  // Bind the key to an explicit gateway instance instead of relying on the
+  // process-global default provider; process.env is never mutated.
+  const gateway = createGateway({ apiKey });
+  const model = env[GATEWAY_MODEL_ENV]?.trim() || GATEWAY_MODEL;
+  const zeroDataRetention = !/^(?:0|false|no|off)$/i.test(env[ZERO_DATA_RETENTION_ENV]?.trim() ?? "");
+  return new VercelJevProvider({
+    model,
+    zeroDataRetention,
+    modelFactory: (id) => gateway.evaluationModel(id),
+  });
+}
+
+/**
+ * The model for one request. Gateway ids are provider-qualified (contain a "/"),
+ * TypeSafe-direct ids (jev-1.13.0) are a different namespace and are never
+ * forwarded: an unqualified request model selects the configured gateway model.
+ */
+function gatewayModelFor(requested: string, configured: string): string {
+  return requested.includes("/") ? requested : configured;
+}
+
+/** Extract TypeSafe's per-question confidence map from gateway provider metadata. */
+function typesafeConfidence(
+  providerMetadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const typesafe = providerMetadata?.typesafe;
+  if (typeof typesafe !== "object" || typesafe === null) return undefined;
+  const confidence = (typesafe as Record<string, unknown>).confidence;
+  if (typeof confidence !== "object" || confidence === null) return undefined;
+  return confidence as Record<string, unknown>;
 }
 
 /** Translate jev questions to gateway evaluation questions. */
@@ -135,14 +196,24 @@ function translateQuestion(question: Question): GatewayQuestion {
 
 /**
  * Translate gateway answers into the answer shape the review engine validates.
- * The gateway reports no per-answer confidence; it is derived losslessly from
- * the distribution: the mass of the selected choice, or the maximum level mass
- * for score. Noul maps to boolean probability.
+ *
+ * Confidence: TypeSafe's separate confidence statistic is read from
+ * `providerMetadata.typesafe.confidence[questionId]` when the gateway supplies
+ * it. Only when that metadata is genuinely unavailable does the provider fall
+ * back to a value derived from the distribution (the mass of the selected
+ * choice, or the maximum level mass for score) — an approximation, not the
+ * model's own confidence. Noul/boolean answers carry probability only; TypeSafe
+ * reports no confidence for them either.
  */
 export function translateAnswers(
   questions: Questions,
   answers: Record<string, GatewayAnswer>,
+  confidence?: Record<string, unknown>,
 ): Record<string, unknown> {
+  const reported = (name: string): number | undefined => {
+    const value = confidence?.[name];
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  };
   const out: Record<string, unknown> = {};
   for (const [name, question] of Object.entries(questions)) {
     const answer = answers[name];
@@ -157,7 +228,7 @@ export function translateAnswers(
       out[name] = {
         type: "choice",
         choice: answer.choice,
-        confidence: probabilities[answer.choice] ?? 0,
+        confidence: reported(name) ?? probabilities[answer.choice] ?? 0,
         probabilities: Object.fromEntries(labels.map((label) => [label, probabilities[label] ?? 0])),
       };
     } else {
@@ -170,13 +241,18 @@ export function translateAnswers(
       out[name] = {
         type: "score",
         score: answer.score,
-        confidence: Math.max(...values),
+        confidence: reported(name) ?? Math.max(...values),
         legend: {},
         probabilities: Object.fromEntries(values.map((value, index) => [String(index), value])),
       };
     }
   }
   return out;
+}
+
+function aborted(reason: unknown): unknown {
+  if (reason instanceof Error) return reason;
+  return new DOMException("run aborted", "AbortError");
 }
 
 /** Map gateway and network errors onto transport failure classes. */

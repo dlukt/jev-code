@@ -188,8 +188,10 @@ npm run smoke           # runs the built CLI in a temporary Git repository with 
 npm run check:package   # package manifest and file-list checks used by the release workflow
 ```
 
-`node scripts/smoke-real.ts` makes a few real Jev requests after `npm run build`; it skips itself without
-`TYPESAFE_API_KEY`. See [docs/architecture.md](docs/architecture.md) for how the code is organized and
+`npm run smoke:real` makes a few real TypeSafe Jev requests after `npm run build`; it skips itself
+without `TYPESAFE_API_KEY`. `npm run smoke:vercel` performs one minimal real Jev evaluation through
+the Vercel AI Gateway; it requires `JEV_SMOKE=1` and `AI_GATEWAY_API_KEY` and skips itself otherwise,
+so neither live test is part of `npm run check`. See [docs/architecture.md](docs/architecture.md) for how the code is organized and
 [docs/RELEASING.md](docs/RELEASING.md) for how releases are published.
 
 ## Jev providers
@@ -211,16 +213,27 @@ export AI_GATEWAY_API_KEY="<key>"   # canonical variable read by the ai package
 ```
 
 An invalid `JEV_PROVIDER` name fails immediately at startup (exit 64), not halfway through a review.
-Model selection (`--model` / `TYPESAFE_MODEL`) applies to both providers; with the Vercel provider the
-model id is gateway-qualified (`typesafe-ai/jev` by default, so leave it unset unless you need another
-gateway-hosted Jev variant).
+
+**Model selection.** `--model` / `TYPESAFE_MODEL` select the TypeSafe-direct model for the default
+provider. The Vercel provider runs in the gateway's model namespace: TypeSafe-direct ids
+(`jev-1.13.0`) are a different namespace and are never forwarded — an unqualified id falls back to
+the configured gateway model, and a slash-qualified gateway id (`typesafe-ai/jev-preview`) is
+honored. The gateway model itself is configured with `JEV_GATEWAY_MODEL` (default `typesafe-ai/jev`,
+the canonical Jev id on the Vercel AI Gateway).
+
+**Zero data retention.** Evaluations can contain repository source code and diffs, so the Vercel
+provider routes only to providers with zero data retention agreements
+(`providerOptions.gateway.zeroDataRetention = true`) by default. Set
+`JEV_GATEWAY_ZERO_DATA_RETENTION=0` only for troubleshooting.
 
 Differences worth knowing:
 
-- The gateway's evaluation API reports boolean/noul probability but no per-answer confidence; the
-  Vercel provider derives confidence from the reported distribution (the selected choice's mass, or the
-  maximum level mass for scores), so nothing is lost but the derived value can differ from TypeSafe's
-  native confidence.
+- TypeSafe's separate per-question confidence statistic is preserved from the gateway response
+  (`providerMetadata.typesafe.confidence`, Choice/Score questions). When that metadata is genuinely
+  unavailable, the provider falls back to a value derived from the reported distribution (the mass
+  of the selected choice, or the maximum level mass for score) — an approximation, not the model's
+  own confidence, so threshold-gated decisions can differ from TypeSafe-direct in that case.
+- Noul/boolean answers carry probability only; TypeSafe reports no separate confidence for them.
 - Usage numbers come from the gateway; when it omits them they are reported as zero.
 
 ## TypeSafe

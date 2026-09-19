@@ -167,7 +167,8 @@ Find and triage options:
 
 Run options:
   --json                    Emit the versioned JSON packet (schema jev-code.packet/v1)
-  --model <id>              Jev model (default ${DEFAULT_MODEL}, or ${MODEL_ENV})
+  --model <id>              Jev model (default ${DEFAULT_MODEL}, or ${MODEL_ENV}); the Vercel
+                            provider uses gateway ids (JEV_GATEWAY_MODEL, default typesafe-ai/jev)
   --no-persist              Do not write .jev-code/runs artifacts
   --repo <dir>              Repository root (default: current Git repository)
   --concurrency <n>         Parallel workflow requests (1-16, default 4)
