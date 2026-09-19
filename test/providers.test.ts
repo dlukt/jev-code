@@ -230,6 +230,38 @@ describe("Vercel provider request translation", () => {
     assert.equal(response.model, "jev-1.13.0");
   });
 
+  test("connection failures classify as transient", async () => {
+    const failure = new TypeError("fetch failed");
+    (failure as unknown as { cause: unknown }).cause = new Error("connect ECONNREFUSED 127.0.0.1:443");
+    assert.equal(classifyVercelError(failure), "transient");
+    const flagged = new Error("service unavailable") as Error & { isRetryable: boolean };
+    flagged.isRetryable = true;
+    assert.equal(classifyVercelError(flagged), "transient");
+    const direct = new Error("getaddrinfo EAI_AGAIN gateway.vercel.ai");
+    assert.equal(classifyVercelError(direct), "transient");
+    const refused = new TypeError("fetch failed");
+    (refused as unknown as { cause: unknown }).cause = new Error("ENOTFOUND what.ever");
+    assert.equal(classifyVercelError(refused), "transient");
+  });
+
+  test("unexpected gateway answer keys reject into the retry path", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: async () => ({
+        answers: {
+          n: { type: "boolean", probability: 0.5 },
+          ghost: { type: "boolean", probability: 0.1 },
+        },
+      }),
+    });
+    const response = (await provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, unknown> };
+    // The extra key must not be silently dropped: the envelope is empty so the
+    // frame parser rejects it and the executor retries.
+    assert.deepEqual(response.answers, {});
+  });
+
   test("malformed gateway answers resolve to an invalid envelope for the executor's retry path", async () => {
     // Missing and wrong-typed answers must NOT reject: a rejected ask() lands in
     // the executor's transport-error block (classified unknown, never retried).

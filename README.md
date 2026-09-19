@@ -234,7 +234,9 @@ Differences worth knowing:
   of the selected choice, or the maximum level mass for score) — an approximation, not the model's
   own confidence, so threshold-gated decisions can differ from TypeSafe-direct in that case.
 - Noul/boolean answers carry probability only; TypeSafe reports no separate confidence for them.
-- Usage numbers come from the gateway; when it omits them they are reported as zero.
+- Usage numbers come from the gateway; when it omits them, input usage is reported as a conservative
+  estimate of the request size (the same estimate the input-token budget reserves), and output usage
+  as zero.
 
 ## TypeSafe
 

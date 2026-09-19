@@ -246,6 +246,10 @@ export function translateAnswers(
     const value = confidence?.[name];
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
   };
+  const unexpected = Object.keys(answers).filter((name) => !(name in questions));
+  if (unexpected.length > 0) {
+    throw new Error(`the gateway returned unexpected answers: ${unexpected.join(", ")}`);
+  }
   const out: Record<string, unknown> = {};
   for (const [name, question] of Object.entries(questions)) {
     const answer = answers[name];
@@ -316,12 +320,26 @@ export function classifyVercelError(error: unknown): TransportFailure {
   }
   if (status === 413 || /max_tokens_exceeded|too large|payload|context length/.test(message))
     return "too_large";
+  const cause = value.cause;
+  const causeMessage =
+    typeof cause === "object" && cause !== null && "message" in cause
+      ? String((cause as { message: unknown }).message).toLowerCase()
+      : "";
+  // Plain connection failures (TypeError: fetch failed with ECONNREFUSED etc.
+  // on `cause`, or AI SDK errors flagged retryable) must retry like other
+  // transient transport problems.
+  const connectionFailure =
+    /fetch failed|network|connection/.test(name.toLowerCase()) ||
+    /econnrefused|enotfound|eai_again|econnreset|epipe/.test(message) ||
+    /econnrefused|enotfound|eai_again|econnreset|epipe/.test(causeMessage) ||
+    value.isRetryable === true;
   if (
     status === 408 ||
     status === 429 ||
     (status !== null && status >= 500) ||
     /timeout|connection|ratelimit/i.test(name) ||
-    /econnreset|etimedout|socket hang up|rate limit/.test(message)
+    /econnreset|etimedout|socket hang up|rate limit|fetch failed/.test(message) ||
+    connectionFailure
   ) {
     return "transient";
   }
