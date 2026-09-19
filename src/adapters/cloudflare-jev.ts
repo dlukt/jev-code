@@ -565,6 +565,13 @@ export function classifyCloudflareError(error: unknown): TransportFailure {
   ) {
     return "auth";
   }
+  // Cloudflare 402 error 2021 (insufficient balance / add money or use BYOK):
+  // a definite account-state rejection, not transient — retrying cannot fix it
+  // and 402 must not fall into the generic-4xx catch-all below the transient
+  // branch either; it lands here as auth so the run stops with a clear reason.
+  if (status === 402 || /insufficient balance|add money|byok/i.test(message)) {
+    return "auth";
+  }
   if (status === 413 || /too large|payload|context length|exceeds the limit/.test(message)) {
     return "too_large";
   }
