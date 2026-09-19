@@ -15,7 +15,7 @@ import { classifyError } from "./jev.ts";
 import { parseFailureLog } from "./logs.ts";
 import { readLines, resolveWorkspacePath } from "./paths.ts";
 import { Recorder } from "./recorder.ts";
-import { redactJson, redactText, safeMessage } from "./redact.ts";
+import { createRedaction, redactJson, redactText, safeMessage } from "./redact.ts";
 import { parseTestRecords } from "./test-records.ts";
 
 /** Read-only git and filesystem inputs confined to `root`. */
@@ -45,9 +45,8 @@ export function createEvidenceParser(): EvidenceParser {
   };
 }
 
-export function createRedaction(): RedactionPort {
-  return { json: (value) => redactJson(value), text: (value) => redactText(value), message: safeMessage };
-}
+// createRedaction moved to redact.ts (env-aware); re-exported for callers.
+export { createRedaction } from "./redact.ts";
 
 /** Artifacts under `<root>/.jev-code/runs`. */
 export function createArtifactStore(root: string): ArtifactStore {
@@ -67,12 +66,13 @@ export function createWorkflowDependencies(
   root: string,
   jev: JevPort,
   classify?: (error: unknown) => TransportFailure,
+  env: NodeJS.ProcessEnv = process.env,
 ): WorkflowDependencies {
   return {
     jev,
     source: createWorkspaceSource(root),
     evidence: createEvidenceParser(),
-    redaction: createRedaction(),
+    redaction: createRedaction(env),
     artifacts: createArtifactStore(root),
     // Prefer the classifier the port itself declares, so a provider-aware
     // port can never be paired with a foreign classifier by default.

@@ -261,8 +261,12 @@ export function translateAnswers(
       out[name] = { type: "noul", noul: answer.probability };
     } else if (question.type === "choice") {
       if (answer.type !== "choice") throw new Error(`answer "${name}" is not a choice answer`);
-      const probabilities = answer.probabilities ?? {};
       const labels = Object.keys(question.criteria);
+      // The gateway shape permits omitting probabilities entirely. An all-zero
+      // distribution would be rejected by readChoice (sum 0) and burn every
+      // retry; synthesize a point mass on the selected choice instead.
+      const probabilities =
+        answer.probabilities ?? Object.fromEntries(labels.map((l) => [l, l === answer.choice ? 1 : 0]));
       const extraLabels = Object.keys(probabilities).filter(
         (label) => !labels.includes(label) && label !== answer.choice,
       );

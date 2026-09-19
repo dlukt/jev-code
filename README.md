@@ -35,7 +35,8 @@ A common agent flow asks jev-code to find relevant files before editing, check c
    it into small, size-limited pieces, such as one changed block of a file or one failure from a log.
 3. **Exact checks run first.** Plain rules catch things like an added `test.skip`, deleted assertions,
    deleted test files, and lockfile, CI or config changes.
-4. **Jev answers fixed-choice questions about each piece.** Using your required TypeSafe API key, jev-code asks
+4. **Jev answers fixed-choice questions about each piece.** Using your Jev credential (TypeSafe API key, or
+   an AI Gateway key with `JEV_PROVIDER=vercel`), jev-code asks
    [TypeSafe Jev](https://typesafe.ai), a model that answers multiple-choice questions, about one small piece
    at a time. For example: "How closely is this changed block related to the task?" jev-code's own code, not
    the model, turns the answers into flags using fixed thresholds.

@@ -290,7 +290,7 @@ export async function runCli(
 
     const jev = injected.adapter ?? jevFromEnvironment(io.env);
     const root = typeof v.repo === "string" ? await repoRoot(v.repo) : await repoRoot(io.cwd);
-    const dependencies = createWorkflowDependencies(root, jev);
+    const dependencies = createWorkflowDependencies(root, jev, undefined, io.env);
     const model = configuredModel(v.model as string | undefined, io.env);
     const options: RunOptions = {
       root,

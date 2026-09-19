@@ -15,6 +15,7 @@ import {
 } from "../src/adapters/config.ts";
 import { createWorkflowDependencies } from "../src/adapters/dependencies.ts";
 import { classifyError, MissingCredentialError, TypeSafeJevProvider } from "../src/adapters/jev.ts";
+import { createRedaction } from "../src/adapters/redact.ts";
 import type { GatewayAnswer } from "../src/adapters/vercel-jev.ts";
 import {
   classifyVercelError,
@@ -245,6 +246,32 @@ describe("Vercel provider request translation", () => {
       CALL_OPTIONS,
     )) as { answers: Record<string, unknown> };
     assert.deepEqual(response.answers, {});
+  });
+
+  test("choice answers without probabilities get a minimal valid distribution", async () => {
+    // The gateway shape permits omitting probabilities; an all-zero map would
+    // be rejected by readChoice (sum 0) and burn every retry. Synthesize a
+    // point mass on the selected choice instead.
+    const provider = new VercelJevProvider({
+      evaluate: async () => ({ answers: { c: { type: "choice", choice: "a" } } }),
+    });
+    const response = (await provider.ask(
+      {
+        state: {},
+        questions: { c: { type: "choice", instructions: "?", criteria: { a: null, b: null } } },
+        model: "m",
+      },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, { probabilities: Record<string, number> }> };
+    assert.deepEqual(response.answers.c?.probabilities, { a: 1, b: 0 });
+  });
+
+  test("a custom environment's gateway key is redacted alongside the process env", async () => {
+    const customEnv = { AI_GATEWAY_API_KEY: "vck_custom_secret_key_0123456789" };
+    const redaction = createRedaction(customEnv);
+    const out = redaction.text(`token=vck_custom_secret_key_0123456789 failed`);
+    assert.equal(out.text.includes("vck_custom_secret_key_0123456789"), false);
+    assert.match(out.text, /\[REDACTED:env_secret\]/);
   });
 
   test("noncanonical score keys like '1.5', '01', '1e0' reject", async () => {
