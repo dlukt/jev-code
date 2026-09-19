@@ -15,6 +15,7 @@ import {
 } from "../src/adapters/config.ts";
 import { createWorkflowDependencies } from "../src/adapters/dependencies.ts";
 import { classifyError, MissingCredentialError, TypeSafeJevProvider } from "../src/adapters/jev.ts";
+import type { GatewayAnswer } from "../src/adapters/vercel-jev.ts";
 import {
   classifyVercelError,
   createVercelAdapter,
@@ -228,6 +229,56 @@ describe("Vercel provider request translation", () => {
       CALL_OPTIONS,
     )) as Record<string, unknown>;
     assert.equal(response.model, "jev-1.13.0");
+  });
+
+  test("prototype-named answer keys count as unexpected", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: async () => ({
+        answers: {
+          n: { type: "boolean", probability: 0.5 },
+          constructor: { type: "boolean", probability: 0.9 },
+        } as Record<string, GatewayAnswer>,
+      }),
+    });
+    const response = (await provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, unknown> };
+    assert.deepEqual(response.answers, {});
+  });
+
+  test("extra probability labels reject instead of being dropped", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: async () => ({
+        answers: {
+          c: { type: "choice", choice: "a", probabilities: { a: 0.6, b: 0.4, ghost: 0.8 } },
+        },
+      }),
+    });
+    const response = (await provider.ask(
+      {
+        state: {},
+        questions: { c: { type: "choice", instructions: "?", criteria: { a: null, b: null } } },
+        model: "m",
+      },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, unknown> };
+    assert.deepEqual(response.answers, {});
+
+    const score = new VercelJevProvider({
+      evaluate: async () => ({
+        answers: { s: { type: "score", score: 1, probabilities: { 0: 0.2, 1: 0.8, 7: 0.1 } } },
+      }),
+    });
+    const scoreResponse = (await score.ask(
+      {
+        state: {},
+        questions: { s: { type: "score", instructions: "?", criteria: [null, null] } },
+        model: "m",
+      },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, unknown> };
+    assert.deepEqual(scoreResponse.answers, {});
   });
 
   test("connection failures classify as transient", async () => {

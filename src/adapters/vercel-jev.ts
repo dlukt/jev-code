@@ -246,7 +246,9 @@ export function translateAnswers(
     const value = confidence?.[name];
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
   };
-  const unexpected = Object.keys(answers).filter((name) => !(name in questions));
+  // Own-property check: prototype names like "constructor" must count as
+  // unexpected answers, not as questions inherited through Object.prototype.
+  const unexpected = Object.keys(answers).filter((name) => !Object.hasOwn(questions, name));
   if (unexpected.length > 0) {
     throw new Error(`the gateway returned unexpected answers: ${unexpected.join(", ")}`);
   }
@@ -261,6 +263,14 @@ export function translateAnswers(
       if (answer.type !== "choice") throw new Error(`answer "${name}" is not a choice answer`);
       const probabilities = answer.probabilities ?? {};
       const labels = Object.keys(question.criteria);
+      const extraLabels = Object.keys(probabilities).filter(
+        (label) => !labels.includes(label) && label !== answer.choice,
+      );
+      if (extraLabels.length > 0) {
+        throw new Error(
+          `answer "${name}" carries probabilities for unknown choices: ${extraLabels.join(", ")}`,
+        );
+      }
       out[name] = {
         type: "choice",
         choice: answer.choice,
@@ -270,6 +280,15 @@ export function translateAnswers(
     } else {
       if (answer.type !== "score") throw new Error(`answer "${name}" is not a score answer`);
       const probabilities = answer.probabilities ?? {};
+      const levelCount = question.criteria.length;
+      const extraLevels = Object.keys(probabilities).filter(
+        (key) => Number.isNaN(Number(key)) || Number(key) < 0 || Number(key) >= levelCount,
+      );
+      if (extraLevels.length > 0) {
+        throw new Error(
+          `answer "${name}" carries probabilities for unknown score levels: ${extraLevels.join(", ")}`,
+        );
+      }
       const values = Array.from(
         { length: question.criteria.length },
         (_, index) => probabilities[String(index)] ?? 0,
