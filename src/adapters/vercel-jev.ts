@@ -283,8 +283,22 @@ export function translateAnswers(
       };
     } else {
       if (answer.type !== "score") throw new Error(`answer "${name}" is not a score answer`);
-      const probabilities = answer.probabilities ?? {};
       const levelCount = question.criteria.length;
+      // Probabilities may be omitted (an allowed gateway shape). Synthesize a
+      // distribution consistent with the reported score: a point mass for
+      // integral scores, linear interpolation between adjacent levels for
+      // fractional ones (readScore accepts and expects those).
+      const probabilities =
+        answer.probabilities ??
+        Object.fromEntries(
+          Array.from({ length: levelCount }, (_, i) => {
+            const lower = Math.floor(answer.score);
+            const frac = answer.score - lower;
+            if (i === lower) return [String(i), Number((1 - frac).toFixed(4))];
+            if (i === lower + 1) return [String(i), Number(frac.toFixed(4))];
+            return [String(i), 0];
+          }),
+        );
       // Exact canonical keys only: Number("1.5")/Number("01")/Number("1e0")
       // would coerce into range and get silently dropped otherwise.
       const canonicalLevels = Array.from({ length: levelCount }, (_, i) => String(i));
@@ -294,10 +308,10 @@ export function translateAnswers(
           `answer "${name}" carries probabilities for unknown score levels: ${extraLevels.join(", ")}`,
         );
       }
-      const values = Array.from(
-        { length: question.criteria.length },
-        (_, index) => probabilities[String(index)] ?? 0,
-      );
+      if (answer.score < -1e-6 || answer.score > levelCount - 1 + 1e-6) {
+        throw new Error(`answer "${name}" reports an out-of-range score: ${answer.score}`);
+      }
+      const values = Array.from({ length: levelCount }, (_, index) => probabilities[String(index)] ?? 0);
       out[name] = {
         type: "score",
         score: answer.score,

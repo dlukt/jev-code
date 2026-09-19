@@ -274,6 +274,35 @@ describe("Vercel provider request translation", () => {
     assert.match(out.text, /\[REDACTED:env_secret\]/);
   });
 
+  test("score answers without probabilities get a minimal valid distribution", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: async () => ({ answers: { s: { type: "score", score: 1 } } }),
+    });
+    const response = (await provider.ask(
+      {
+        state: {},
+        questions: { s: { type: "score", instructions: "?", criteria: [null, null, null] } },
+        model: "m",
+      },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, { probabilities: Record<string, number> }> };
+    assert.deepEqual(response.answers.s?.probabilities, { 0: 0, 1: 1, 2: 0 });
+
+    // Out-of-range scores must not synthesize a valid distribution.
+    const wild = new VercelJevProvider({
+      evaluate: async () => ({ answers: { s: { type: "score", score: 7 } } }),
+    });
+    const wildResponse = (await wild.ask(
+      {
+        state: {},
+        questions: { s: { type: "score", instructions: "?", criteria: [null, null] } },
+        model: "m",
+      },
+      CALL_OPTIONS,
+    )) as { answers: Record<string, unknown> };
+    assert.deepEqual(wildResponse.answers, {});
+  });
+
   test("noncanonical score keys like '1.5', '01', '1e0' reject", async () => {
     for (const key of ["1.5", "01", "1e0"]) {
       const provider = new VercelJevProvider({
