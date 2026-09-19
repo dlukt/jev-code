@@ -61,10 +61,11 @@ node dist/cli.js --help   # use "node /path/to/jev-code/dist/cli.js" wherever th
 
 After 0.1.0 is released: `npm install --global jev-code`.
 
-**API key.** jev-code reads the required key only from this environment variable, never from files or flags:
+**API key.** jev-code reads the required key only from environment variables, never from files or flags. Which key it needs depends on the provider (see below):
 
 ```sh
-export TYPESAFE_API_KEY="<your TypeSafe API key>"
+export TYPESAFE_API_KEY="<your TypeSafe API key>"    # default provider
+export AI_GATEWAY_API_KEY="<your gateway key>"       # JEV_PROVIDER=vercel
 ```
 
 **Example.** An agent was asked to fix a crash. It did, but it also skipped the test and removed an assertion.
@@ -190,6 +191,37 @@ npm run check:package   # package manifest and file-list checks used by the rele
 `node scripts/smoke-real.ts` makes a few real Jev requests after `npm run build`; it skips itself without
 `TYPESAFE_API_KEY`. See [docs/architecture.md](docs/architecture.md) for how the code is organized and
 [docs/RELEASING.md](docs/RELEASING.md) for how releases are published.
+
+## Jev providers
+
+Jev inference is pluggable. Both providers expose the same Jev/System One capability to the review
+engine — identical questions, identical calibrated answers, identical reports — so reviews behave the
+same either way. Selection is entirely through configuration, at process start:
+
+```sh
+export JEV_PROVIDER=typesafe        # default: direct TypeSafe API
+export TYPESAFE_API_KEY="<key>"
+```
+
+or
+
+```sh
+export JEV_PROVIDER=vercel          # Vercel AI Gateway hosting of Jev
+export AI_GATEWAY_API_KEY="<key>"   # canonical variable read by the ai package
+```
+
+An invalid `JEV_PROVIDER` name fails immediately at startup (exit 64), not halfway through a review.
+Model selection (`--model` / `TYPESAFE_MODEL`) applies to both providers; with the Vercel provider the
+model id is gateway-qualified (`typesafe-ai/jev` by default, so leave it unset unless you need another
+gateway-hosted Jev variant).
+
+Differences worth knowing:
+
+- The gateway's evaluation API reports boolean/noul probability but no per-answer confidence; the
+  Vercel provider derives confidence from the reported distribution (the selected choice's mass, or the
+  maximum level mass for scores), so nothing is lost but the derived value can differ from TypeSafe's
+  native confidence.
+- Usage numbers come from the gateway; when it omits them they are reported as zero.
 
 ## TypeSafe
 

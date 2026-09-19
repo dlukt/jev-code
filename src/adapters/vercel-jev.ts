@@ -1,15 +1,9 @@
 import { experimental_evaluate as aiEvaluate } from "ai";
 import type { Entry, Question, Questions } from "../core/questions.ts";
 import type { JevCallOptions, JevPort, JevRequest, TransportFailure } from "../core/types.ts";
+import { MissingCredentialError } from "./jev.ts";
 
-export class MissingCredentialError extends Error {
-  constructor(
-    message = "AI_GATEWAY_API_KEY is required; set it in the process environment before running jev-code with JEV_PROVIDER=vercel",
-  ) {
-    super(message);
-    this.name = "MissingCredentialError";
-  }
-}
+export { MissingCredentialError };
 
 /** Gateway model id for Jev on the Vercel AI Gateway. */
 export const GATEWAY_MODEL = "typesafe-ai/jev";
@@ -81,7 +75,10 @@ export class VercelJevProvider implements JevPort {
 /** Build the gateway-backed Jev port. The API key is read only from the given environment. */
 export function createVercelAdapter(env: NodeJS.ProcessEnv = process.env): JevPort {
   const apiKey = env.AI_GATEWAY_API_KEY?.trim();
-  if (!apiKey) throw new MissingCredentialError();
+  if (!apiKey)
+    throw new MissingCredentialError(
+      "AI_GATEWAY_API_KEY is required; set it in the process environment before running jev-code with JEV_PROVIDER=vercel",
+    );
   return new VercelJevProvider();
 }
 
