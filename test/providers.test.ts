@@ -433,3 +433,56 @@ describe("provider selection through the CLI", () => {
     }
   });
 });
+
+describe("Vercel provider timeout and abort", () => {
+  test("a slow evaluation is aborted at the executor timeout", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: (call) =>
+        new Promise((_resolve, reject) => {
+          call.abortSignal?.addEventListener("abort", () =>
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          );
+        }),
+    });
+    await assert.rejects(
+      provider.ask(
+        { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+        { timeoutMs: 30 },
+      ),
+      /aborted/,
+    );
+  });
+
+  test("an external abort signal is forwarded", async () => {
+    const provider = new VercelJevProvider({
+      evaluate: (call) =>
+        new Promise((_resolve, reject) => {
+          call.abortSignal?.addEventListener("abort", () =>
+            reject(Object.assign(new Error("run aborted"), { name: "AbortError" })),
+          );
+        }),
+    });
+    const controller = new AbortController();
+    const pending = provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      { timeoutMs: 5_000, signal: controller.signal },
+    );
+    controller.abort();
+    await assert.rejects(pending, /aborted/);
+  });
+
+  test("the timeout timer does not keep the process alive", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const provider = new VercelJevProvider({
+      evaluate: async (call) => {
+        observedSignal = call.abortSignal;
+        return { answers: { n: { type: "boolean", probability: 1 } } };
+      },
+    });
+    await provider.ask(
+      { state: {}, questions: { n: { type: "noul", instructions: "?" } }, model: "m" },
+      { timeoutMs: 60_000 },
+    );
+    assert.equal(observedSignal?.aborted, false);
+  });
+});

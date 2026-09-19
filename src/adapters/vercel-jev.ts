@@ -54,13 +54,32 @@ export class VercelJevProvider implements JevPort {
   }
 
   async ask(request: JevRequest, options: JevCallOptions): Promise<unknown> {
-    const result = await this.evaluate({
-      model: this.model,
-      state: request.state as Entry,
-      questions: translateQuestions(request.questions),
-      maxRetries: 0,
-      ...(options.signal ? { abortSignal: options.signal } : {}),
-    });
+    // The gateway evaluate API has no timeout parameter; enforce the executor's
+    // timeout by aborting the shared signal, which surfaces as a TimeoutError.
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () =>
+        controller.abort(
+          new DOMException(`gateway evaluation timed out after ${options.timeoutMs}ms`, "TimeoutError"),
+        ),
+      options.timeoutMs,
+    );
+    const external = options.signal;
+    const forward = () => controller.abort(external?.reason);
+    external?.addEventListener("abort", forward, { once: true });
+    let result: Awaited<ReturnType<EvaluateFn>>;
+    try {
+      result = await this.evaluate({
+        model: this.model,
+        state: request.state as Entry,
+        questions: translateQuestions(request.questions),
+        maxRetries: 0,
+        abortSignal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+      external?.removeEventListener("abort", forward);
+    }
     return {
       model: result.response?.modelId ?? this.model,
       answers: translateAnswers(request.questions, result.answers),
