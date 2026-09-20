@@ -92,7 +92,10 @@ export class CloudflareJevProvider implements JevPort {
   constructor(options: CloudflareJevProviderOptions) {
     this.accountId = options.accountId;
     this.apiToken = options.apiToken;
-    this.baseURL = options.baseURL ?? CLOUDFLARE_API_BASE_URL;
+    // Strip trailing slashes so `https://proxy.example/` does not produce a
+    // `//accounts/...` path, which route-sensitive proxies 404 instead of
+    // forwarding.
+    this.baseURL = (options.baseURL ?? CLOUDFLARE_API_BASE_URL).replace(/\/+$/, "");
     this.model = options.model ?? CLOUDFLARE_MODEL;
     this.fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init));
     // The port owns its credentials even when constructed directly (not via
@@ -208,13 +211,19 @@ async function readCloudflareResponse(response: Response): Promise<JevPayload | 
       `cloudflare returned a non-JSON body (HTTP ${response.status})`,
     );
   }
-  if (!response.ok || (body as { success?: unknown }).success === false) {
+  // A JSON body of literal null must not throw on the `.success` read below:
+  // it is a malformed *successful* payload (like a missing-answers payload),
+  // so it falls through to jevPayloadOf → empty envelope → the executor's
+  // invalid-response retry path instead of a raw TypeError classified unknown.
+  if (!response.ok || (body as { success?: unknown } | null)?.success === false) {
     throw new CloudflareStatusError(
       response.status,
       `cloudflare run failed (HTTP ${response.status}): ${cloudflareDiagnostics(body)}`,
     );
   }
-  const outer = (body as { result?: unknown }).result;
+  // A null body has no `result` field to read either — guard the access so it
+  // flows into jevPayloadOf (null) → empty envelope below.
+  const outer = body === null ? undefined : (body as { result?: unknown }).result;
   // Execution-state envelope: {state, result}. Completed runs unwrap to the
   // inner result; any other state is a provider error.
   let candidate: unknown = outer;
@@ -573,7 +582,12 @@ export function classifyCloudflareError(error: unknown): TransportFailure {
   if (status === 402 || /insufficient balance|add money|byok/i.test(message)) {
     return "rejected";
   }
-  if (status === 413 || /too large|payload|context length|exceeds the limit/.test(message)) {
+  if (
+    status === 413 ||
+    /too large|payload too large|payload size|payload exceeds|request too large|context length|input too large|exceeds the (payload|input|context|request|token|size) limit/.test(
+      message,
+    )
+  ) {
     return "too_large";
   }
   const cause = value.cause;

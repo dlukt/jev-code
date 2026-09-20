@@ -415,6 +415,33 @@ describe("cloudflare response parsing", () => {
     assert.doesNotThrow(() => readEnvelope(response));
   });
 
+  test("a literal JSON null body resolves to the empty-envelope retry path, not a TypeError", async () => {
+    // JSON.parse("null") yields null; reading `.success` off it used to throw
+    // a raw TypeError (classified "unknown", never retried). It must behave
+    // like any other malformed successful payload: empty envelope, executor
+    // retries it as an invalid response.
+    const { provider } = providerWith(200, null);
+    const response = (await provider.ask(fullRequest(), CALL_OPTIONS)) as {
+      answers: Record<string, unknown>;
+    };
+    assert.deepEqual(response.answers, {});
+    assert.doesNotThrow(() => readEnvelope(response));
+  });
+
+  test("a trailing slash in baseURL does not produce a //accounts request path", async () => {
+    const transport = respondWith(200, envelope(jevResult()));
+    const provider = new CloudflareJevProvider({
+      accountId: "acc123",
+      apiToken: "cftoken1234567890",
+      baseURL: "https://proxy.example/",
+      fetchFn: transport.fetchFn,
+    });
+    await provider.ask(fullRequest(), CALL_OPTIONS);
+    const url = transport.seen[0]?.url;
+    assert.ok(url, "no request was captured");
+    assert.equal(url, "https://proxy.example/accounts/acc123/ai/run");
+  });
+
   test("malformed answer types resolve to the empty-envelope retry path", async () => {
     for (const answers of [
       { n: { type: "choice", choice: "x" } }, // wrong type
@@ -638,6 +665,21 @@ describe("cloudflare error classification", () => {
       [statusError(403, "cloudflare run failed (HTTP 403): error 1000: Forbidden"), "auth"],
       [statusError(408, "request timeout"), "transient"],
       [statusError(413, "cloudflare run failed (HTTP 413): error 10013: request too large"), "too_large"],
+      // Bare `payload`/`exceeds the limit` matching must not fire here: schema
+      // and validation failures (e.g. "invalid payload", HTTP 400) are
+      // rejections, not size problems — misreporting them as too_large makes
+      // the find workflow recursively split and resend the same bad request.
+      [statusError(400, "cloudflare run failed (HTTP 400): error 10001: invalid payload"), "rejected"],
+      [
+        statusError(400, "cloudflare run failed (HTTP 400): error 10001: complexity exceeds the limit"),
+        "rejected",
+      ],
+      // Size-specific phrases still classify as too_large.
+      [statusError(400, "cloudflare run failed (HTTP 400): error 10013: payload too large"), "too_large"],
+      [
+        statusError(400, "cloudflare run failed (HTTP 400): error 10013: exceeds the input limit"),
+        "too_large",
+      ],
       [statusError(429, "cloudflare run failed (HTTP 429): error 1400: rate limited"), "transient"],
       [statusError(500, "internal error"), "transient"],
       [statusError(503, "service unavailable"), "transient"],

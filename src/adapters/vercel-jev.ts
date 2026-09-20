@@ -363,7 +363,7 @@ export function classifyVercelError(error: unknown): TransportFailure {
   ) {
     return "auth";
   }
-  if (status === 413 || /max_tokens_exceeded|too large|payload|context length/.test(message))
+  if (status === 413 || /max_tokens_exceeded|too large|payload too large|context length/.test(message))
     return "too_large";
   const cause = value.cause;
   const causeMessage =
