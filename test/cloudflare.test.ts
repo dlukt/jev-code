@@ -643,12 +643,15 @@ describe("cloudflare error classification", () => {
       [statusError(503, "service unavailable"), "transient"],
       [statusError(422, "cloudflare run failed (HTTP 422): error 10001: bad request"), "rejected"],
       // Live-observed: Cloudflare 402 error 2021 (insufficient balance).
+      // rejected (not auth): credentials can be valid while the account is out
+      // of funds; the rejected path is terminal without retries and preserves
+      // the billing diagnostic for the user.
       [
         statusError(
           402,
           "cloudflare run failed (HTTP 402): error 2021: Insufficient balance; add money to your gateway or use BYOK",
         ),
-        "auth",
+        "rejected",
       ],
       [Object.assign(new Error("aborted"), { name: "AbortError" }), "aborted"],
       [Object.assign(new Error("cloudflare run timed out after 30ms"), { name: "AbortError" }), "aborted"],
