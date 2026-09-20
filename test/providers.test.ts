@@ -152,6 +152,7 @@ describe("TypeSafe provider", () => {
       [statusError(403, "forbidden"), "auth"],
       [Object.assign(new Error("nope"), { name: "APIUserAbortError" }), "aborted"],
       [statusError(413, "payload too large"), "too_large"],
+      [statusError(400, "payload exceeds the maximum allowed size"), "too_large"],
       [statusError(429, "rate limit"), "transient"],
       [statusError(503, "unavailable"), "transient"],
       [statusError(422, "bad request"), "rejected"],
@@ -587,6 +588,10 @@ describe("Vercel error classification", () => {
       [gatewayError(403, "GatewayForbiddenError"), "auth"],
       [new Error("Invalid API key"), "auth"],
       [gatewayError(413, "GatewayInvalidRequestError", "payload too large"), "too_large"],
+      [
+        gatewayError(400, "GatewayInvalidRequestError", "payload exceeds the maximum allowed size"),
+        "too_large",
+      ],
       [gatewayError(429, "GatewayRateLimitError"), "transient"],
       [gatewayError(500, "GatewayInternalServerError"), "transient"],
       [gatewayError(408, "GatewayTimeoutError"), "transient"],

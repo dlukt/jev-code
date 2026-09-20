@@ -72,7 +72,10 @@ export function classifyError(error: unknown): TransportFailure {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   if (name === "APIUserAbortError" || name === "AbortError") return "aborted";
   if (status === 401 || status === 403 || /authentication|permissiondenied/i.test(name)) return "auth";
-  if (status === 413 || /max_tokens_exceeded|too large|payload too large|context length/.test(message))
+  if (
+    status === 413 ||
+    /max_tokens_exceeded|too large|payload too large|payload exceeds|context length/.test(message)
+  )
     return "too_large";
   if (
     status === 408 ||

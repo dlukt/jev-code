@@ -243,14 +243,18 @@ async function readCloudflareResponse(response: Response): Promise<JevPayload | 
   return jev;
 }
 
-/** Detect the Cloudflare execution-state envelope around a model result. */
-function isExecutionState(value: unknown): value is { state: string; result: unknown } {
+/**
+ * Detect the Cloudflare execution-state envelope around a model result.
+ * The inner `result` is optional: failed or still-running executions can be
+ * `{state: "Failed", errors: [...]}` with no model result at all — those must
+ * take the provider-error path, not look like a malformed Jev payload.
+ */
+function isExecutionState(value: unknown): value is { state: string; result?: unknown } {
   return (
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
-    typeof (value as { state?: unknown }).state === "string" &&
-    "result" in value
+    typeof (value as { state?: unknown }).state === "string"
   );
 }
 

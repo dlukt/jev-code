@@ -406,6 +406,17 @@ describe("cloudflare response parsing", () => {
     }
   });
 
+  test("a non-completed execution state without an inner result is still a provider error", async () => {
+    // Failed runs can omit the model result entirely: {state: "Failed", errors: [...]}.
+    // The state envelope must be detected before the result read, not treated
+    // as a malformed Jev payload (invalid-response retry hides the provider state).
+    const { provider } = providerWith(200, envelope({ state: "Failed", errors: [{ message: "boom" }] }));
+    await assert.rejects(provider.ask(fullRequest(), CALL_OPTIONS), (error: unknown) => {
+      assert.match((error as Error).message, /run state is "Failed"/);
+      return true;
+    });
+  });
+
   test("missing answers resolve to an invalid envelope for the executor's retry path", async () => {
     const { provider } = providerWith(200, envelope({ model: "jev-1.13.0", usage: {} }));
     const response = (await provider.ask(fullRequest(), CALL_OPTIONS)) as {
